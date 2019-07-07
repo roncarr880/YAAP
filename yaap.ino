@@ -24,6 +24,8 @@ const char mounting = UPRIGHT;     // pick one
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
 
+#define ACC_MAX_VALUE  4343.0f     // pre-measured value
+
 #include <Wire.h>
 #include <Servo.h>
 #include <avr/interrupt.h>
@@ -243,7 +245,7 @@ static int last_a, last_e;
    elevator.writeMicroseconds(e);
 
    if( DBUG ){
-      Serial.print(e); Serial.write(' '); Serial.println(a);
+     Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
    }
   
 }
@@ -333,28 +335,41 @@ void IMU_process(){
   gyro_z -= gyro_z_cal;                       //Subtract the offset calibration value from the raw gyro_z value
 
   //Gyro angle calculations
-  //0.0000611 = 1 / (250Hz / 65.5)           // Arduino UNO needs the float casts or get NaN values
-  angle_pitch += (float)gyro_x * 0.0000611;  //Calculate the traveled pitch angle, add this to the angle_pitch variable
-  angle_roll += (float)gyro_y * 0.0000611;   //Calculate the traveled roll angle, add this to the angle_roll variable
-
+  //0.0000611 = 1 / (250Hz / 65.5)
+  if( acc_z > 0 ){                              // upside right
+     angle_pitch += (float)gyro_x * 0.0000611;  //Calculate the traveled pitch angle
+     angle_roll += (float)gyro_y * 0.0000611;   //Calculate the traveled roll angle
+  }
+  // not technically correct as angles do not grow more than 90 degrees.
+  // but when twisted around it integrates the angles reasonably
+  else{                                         // upside down
+     angle_pitch -= (float)gyro_x * 0.0000611;  //Calculate the traveled pitch angle
+     angle_roll -= (float)gyro_y * 0.0000611;   //Calculate the traveled roll angle    
+  }
+  
   // Yaw corrections
   //0.000001066 = 0.0000611 * (3.142(PI) / 180degr) The Arduino sine function is in radians
   // angle_pitch += angle_roll * sin(gyro_z * 0.000001066); // transfer the roll angle to the pitch angel
   // angle_roll -= angle_pitch * sin(gyro_z * 0.000001066); // transfer the pitch angle to the roll angel
+  
   angle_pitch += sin(angle_roll/57.3) * (float)gyro_z * 0.0000611;
   angle_roll -=  sin(angle_pitch/57.3) * (float)gyro_z * 0.0000611;
   
+  
   ACCEL_process();
   
-   // Correct the drift of the gyro with ACCEL data
+   // Correct the drift of the gyro with ACCEL data, converge a little quicker than the original
    angle_pitch = angle_pitch * 0.995 + angle_pitch_acc * 0.005;    
    angle_roll = angle_roll * 0.995 + angle_roll_acc * 0.005;
   
    // if the airplane loops or rolls, don't make it unwind with another loop or roll
+   // I don't think this is needed now since angles to not pass 90 degrees
+   /*
     if( angle_pitch > 180 ) angle_pitch -= 360;
     if( angle_pitch < -180 ) angle_pitch += 360;
     if( angle_roll > 180 ) angle_roll -=  360;
     if( angle_roll < -180 ) angle_roll += 360;
+    */
   
     if( DBUG ) write_LCD();                               //Write the roll and pitch values to the LCD display
    
@@ -366,6 +381,23 @@ void IMU_process(){
 }
 
 
+
+// since the accelerometers have noise due to constant movement, a small angle approximation may work
+// just as well as the trig functions.  When not moving, the total gravity vector rotated should 
+// form a perfect sphere of the max value of the accelerometer, and again variations would be due to noise.
+// The max value seems to be about 4343 with noise of +-30.
+void ACCEL_process(){
+
+  if( acc_x < acc_z && acc_y < acc_z ){        // more or less upright
+     angle_pitch_acc = ((float)acc_y/ACC_MAX_VALUE) * 57.296;       //Calculate the pitch angle 
+     angle_roll_acc =  ((float)acc_x/ACC_MAX_VALUE) * -57.296;      //Calculate the roll angle  
+  }
+  else {                                       // use the current gyro values
+     angle_pitch_acc = angle_pitch;   angle_roll_acc = angle_roll;
+  }
+}
+
+#ifdef NOWAY
   //Accelerometer angle calculations.   Had some problems with NaN's here.
 void ACCEL_process(){
 long acc_total_vector;
@@ -405,7 +437,7 @@ static uint8_t once;
   //  angle_roll_acc -= 0.0;                               //Accelerometer calibration value for roll
 
 }
-
+#endif
 
 // modified to write to serial instead of a I2C display
 void write_LCD(){
@@ -413,7 +445,7 @@ static int lcd_loop_counter;
 static int angle_pitch_buffer, angle_roll_buffer;
 
 
- return;   // defeat this to see other debug printing
+  return;   // defeat this to see other debug printing
   //To get a 250Hz program loop (4us) it's only possible to write one character per loop
   
   if(lcd_loop_counter == 14)lcd_loop_counter = 0;                      //Reset the counter after 14 characters
@@ -422,6 +454,7 @@ static int angle_pitch_buffer, angle_roll_buffer;
     angle_pitch_buffer = angle_pitch * 10;                      //Buffer the pitch angle because it will change
     // angle_pitch_buffer = (angle_pitch_acc - angle_pitch) * 10;
     // angle_pitch_buffer = angle_pitch_acc * 10;
+    // Serial.write(' '); Serial.println(acc_z);
     Serial.println();
   }
   if(lcd_loop_counter == 2){
