@@ -20,11 +20,11 @@
 #define RIGHT_SIDE 3
 const char mounting = UPRIGHT;     // pick one
 
-#define WING_ANGLE 5.0             // desired trim pitch
+#define WING_ANGLE 5.0             // desired trim pitch ( wing attack angle )
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
 
-#define ACC_MAX_VALUE  4343.0f     // pre-measured value
+#define ACC_MAX_VALUE  4343.0f     // measured value of accelerometer readings
 
 #include <Wire.h>
 #include <Servo.h>
@@ -96,8 +96,8 @@ void setup(){
 
 ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver wired to A0,A1,A2
                      // save the values for later processing
-  pwm_values[pwm_in].timer = micros();
   pwm_values[pwm_in].data = PINC;
+  pwm_values[pwm_in].timer = micros();
   ++pwm_in;
   pwm_in &= 7;
 }
@@ -107,7 +107,8 @@ void user_process(){    // decode the pwm servo data received, set the user vari
 static uint8_t last_bit[3];
 static unsigned long last_time[3];
 int8_t mask,b,i;
-unsigned long dt;  
+unsigned long dt;
+int us;  
 
   // check each bit for a change and take the appropriate steps needed
   mask = 1;    // start with bit 0
@@ -120,12 +121,13 @@ unsigned long dt;
          }
          else{                             // it went low, so figure out how long it was high
             dt = pwm_values[pwm_out].timer - last_time[i];
-            if( dt > 800 && dt < 2200 ){   // could be real
-               dt -= 1500;                 // sub out the zero point
+            us = dt;                       // make a signed copy
+            if( dt > 800 && dt < 2200 ){   // test the unsigned long version as a sanity check
+               us -= 1500;                        // sub out the zero point, get -500 to 500 in values
                switch(i){
-                   case 0:  user_a = dt; break;    // ailerons
-                   case 1:  user_e = dt; break;    // elevator
-                   case 2:  user_g = dt; break;    // camera gimbal
+                  case 0:  user_a = us; break;    // ailerons
+                  case 1:  user_e = us; break;    // elevator
+                  case 2:  user_g = us; break;    // camera gimbal
                }  
             }
          }
@@ -211,7 +213,7 @@ int16_t temp;
 
 void servo_process(){    // write the servo's every 20 ms
 unsigned long timer;
-int a,e;
+int a,e,p;
 static int last_a, last_e;
 
    if( millis() - timer < 20 ) return;
@@ -219,32 +221,39 @@ static int last_a, last_e;
    timer = millis();
 
    // combine the auto pilot and the user input using a simple algorithm
-   a = map(roll*10,-900,900,500,-500);    // auto pilot trys to keep upright and reduce angle to zero
-   e = map((pitch-WING_ANGLE)*10,-900,900,-500,500);
+   // Set Proportional gain with the servo travel desired for +- 90 degrees tilt
+   // 40% is -200,200  100% is -500,500
+   // Can't use 100% as that may cancel completely any user inputs.
+   a = map(roll*10,-900,900,200,-200);
+   e = map(pitch*10,-900,900,-200,200);
 
-   // try 40% auto and 60% user
-   a *= 4;
-   e *= 4;
-   a /= 10;
-   e /= 10;
-
-   // add in the user input.  Since the auto is usually opposite the user, put in 100% user to get 60% max
+   // if upside down reverse the elevator, avoid split s into the ground, recover with aileron.
+   if( acc_z < 0 ) e = -e;
+   
+   // add in the user input.
    a += user_a;  e += user_e;
 
-   // reverse the servo's if needed
+   // reverse the servo's if needed, don't reverse channels in the transmitter.
    if( AIL_REVERSE ) a = -a;
    if( ELE_REVERSE ) e = -e;
 
    a += 1500;     // add in servo mid position
    e += 1500;
 
-   if( a == last_a && e == last_e ) return;   // save some time?, I don't think so when flying but ok for debug
-   last_a = a;  last_e = e;                   // !!! remove this later
-   
-   aileron.writeMicroseconds(a);
-   elevator.writeMicroseconds(e);
+   a = constrain(a,1000,2000);
+   e = constrain(e,1000,2000);
 
-   if( DBUG ){
+   p = 0;
+   if( a != last_a ){
+      aileron.writeMicroseconds(a);
+      last_a = a; p = 1;
+   }
+   if( e != last_e ){
+      elevator.writeMicroseconds(e);
+      last_e = e; p = 1;
+   }
+
+   if( DBUG && p ){
      Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
    }
   
@@ -255,26 +264,10 @@ static int last_a, last_e;
    MPU code from the below source, and modified where needed for this application
    And perhaps bugs fixed or introduced.
    
-*/   
-
-///////////////////////////////////////////////////////////////////////////////////////
-/*Terms of use
-///////////////////////////////////////////////////////////////////////////////////////
-//THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-//IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-//FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-//AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-//LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-//OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-//THE SOFTWARE.
-
-
-///////////////////////////////////////////////////////////////////////////////////////
-//Support
-///////////////////////////////////////////////////////////////////////////////////////
+   
 Website: http://www.brokking.net/imu.html
 Youtube: https://youtu.be/4BoIE8YQwM8
-Version: 1.0 (May 5, 2016)
+
 */
 
 
@@ -325,8 +318,8 @@ void setup_mpu_6050_registers(){
 
 void IMU_process(){
 
-  if(micros() - IMU_timer < 4000) return;   // run at 250 hz rate, call as often as wanted
-  IMU_timer = micros();                                           
+  if(micros() - IMU_timer < 5000) return;   // run at 200 hz rate, call as often as wanted
+  IMU_timer += 5000;                                           
   
   read_mpu_6050_data();                              //Read the raw acc and gyro data from the MPU-6050
 
@@ -336,108 +329,55 @@ void IMU_process(){
 
   //Gyro angle calculations
   //0.0000611 = 1 / (250Hz / 65.5)
-  if( acc_z > 0 ){                              // upside right
-     angle_pitch += (float)gyro_x * 0.0000611;  //Calculate the traveled pitch angle
-     angle_roll += (float)gyro_y * 0.0000611;   //Calculate the traveled roll angle
+  //0.0000763 = 1 / (200hz / 65.5)
+
+  angle_roll += (float)gyro_y * 0.0000763;   //Calculate the traveled roll angle  
+  if( acc_z >= 0 ){                              // upside right
+     angle_pitch += (float)gyro_x * 0.0000763;  //Calculate the traveled pitch angle
   }
-  // not technically correct as angles do not grow more than 90 degrees.
-  // but when twisted around it integrates the angles reasonably
   else{                                         // upside down
-     angle_pitch -= (float)gyro_x * 0.0000611;  //Calculate the traveled pitch angle
-     angle_roll -= (float)gyro_y * 0.0000611;   //Calculate the traveled roll angle    
+     angle_pitch -= (float)gyro_x * 0.0000763;  //Calculate the traveled pitch angle
   }
-  
+ 
   // Yaw corrections
   //0.000001066 = 0.0000611 * (3.142(PI) / 180degr) The Arduino sine function is in radians
-  // angle_pitch += angle_roll * sin(gyro_z * 0.000001066); // transfer the roll angle to the pitch angel
-  // angle_roll -= angle_pitch * sin(gyro_z * 0.000001066); // transfer the pitch angle to the roll angel
+  // angle_pitch += angle_roll * sin(gyro_z * 0.000001066); // transfer the roll angle to the pitch angle
+  // angle_roll -= angle_pitch * sin(gyro_z * 0.000001066); // transfer the pitch angle to the roll angle
   
-  angle_pitch += sin(angle_roll/57.3) * (float)gyro_z * 0.0000611;
-  angle_roll -=  sin(angle_pitch/57.3) * (float)gyro_z * 0.0000611;
+   angle_pitch += sin(angle_roll/57.3) * (float)gyro_z * 0.0000763;
+   angle_roll -=  sin(angle_pitch/57.3) * (float)gyro_z * 0.0000763;
   
-  
-  ACCEL_process();
-  
-   // Correct the drift of the gyro with ACCEL data, converge a little quicker than the original
+   ACCEL_process();
+
+  // discontinuity at roll 180 degrees
+   if( angle_roll_acc - angle_roll > 180 ) angle_roll = angle_roll_acc;
+   if( angle_roll - angle_roll_acc > 180 ) angle_roll = angle_roll_acc;
+   
+   // Correct the drift of the gyro with ACCEL data
    angle_pitch = angle_pitch * 0.995 + angle_pitch_acc * 0.005;    
    angle_roll = angle_roll * 0.995 + angle_roll_acc * 0.005;
   
-   // if the airplane loops or rolls, don't make it unwind with another loop or roll
-   // I don't think this is needed now since angles to not pass 90 degrees
-   /*
-    if( angle_pitch > 180 ) angle_pitch -= 360;
-    if( angle_pitch < -180 ) angle_pitch += 360;
-    if( angle_roll > 180 ) angle_roll -=  360;
-    if( angle_roll < -180 ) angle_roll += 360;
-    */
-  
-    if( DBUG ) write_LCD();                               //Write the roll and pitch values to the LCD display
+   if( DBUG ) write_LCD();              //Write the roll and pitch values to the LCD display
    
-   // save a final copy of the working values
-   // noInterrupts();           // may or may not need to be guarded depending upon what code is added
-   pitch = angle_pitch;         // and how it is configured to work.  If values used in an interrupt 
-   roll  = angle_roll;          // then should be guarded.
-   // interrupts();
-}
-
-
-
-// since the accelerometers have noise due to constant movement, a small angle approximation may work
-// just as well as the trig functions.  When not moving, the total gravity vector rotated should 
-// form a perfect sphere of the max value of the accelerometer, and again variations would be due to noise.
-// The max value seems to be about 4343 with noise of +-30.
-void ACCEL_process(){
-
-  if( acc_x < acc_z && acc_y < acc_z ){        // more or less upright
-     angle_pitch_acc = ((float)acc_y/ACC_MAX_VALUE) * 57.296;       //Calculate the pitch angle 
-     angle_roll_acc =  ((float)acc_x/ACC_MAX_VALUE) * -57.296;      //Calculate the roll angle  
-  }
-  else {                                       // use the current gyro values
-     angle_pitch_acc = angle_pitch;   angle_roll_acc = angle_roll;
-  }
-}
-
-#ifdef NOWAY
-  //Accelerometer angle calculations.   Had some problems with NaN's here.
-void ACCEL_process(){
-long acc_total_vector;
-long t;
-static uint8_t once;
-
-
-  t = (long)acc_x * (long)acc_x;     // integer math overflow issues with original program code.
-  t+= (long)acc_y * (long)acc_y;     // caused asin to return NaN's
-  t+= (long)acc_z * (long)acc_z;
-  
-  //acc_total_vector = sqrt((acc_x*acc_x)+(acc_y*acc_y)+(acc_z*acc_z));  //Calculate the total accelerometer vector
-  acc_total_vector = sqrt(t);
-  //57.296 = 1 / (3.142 / 180) The Arduino asin function is in radians
-  if( DBUG && once == 0 ){
-    Serial.print(acc_x); Serial.write(' ');
-    Serial.print(acc_y); Serial.write(' ');
-    Serial.print(acc_z); Serial.write(' ');
-    Serial.println(acc_total_vector);
-    ++once;
-  }
- 
-  angle_pitch_acc = asin((float)acc_y/acc_total_vector) * 57.296;       //Calculate the pitch angle
-  if( isnan(angle_pitch_acc)) angle_pitch_acc = angle_pitch; 
-  angle_roll_acc = asin((float)acc_x/acc_total_vector) * -57.296;       //Calculate the roll angle
-  if( isnan(angle_roll_acc)) angle_roll_acc = angle_roll; 
-  
-  if( acc_z < 0 ){    // asin repeats and does not find angles in quadrants 3 and 4.
-   //  angle_pitch_acc = (angle_pitch_acc >= 0 ) ? 180 - angle_pitch_acc : -180 - angle_pitch_acc;
-   //  angle_roll_acc =  (angle_roll_acc >= 0) ? 180 - angle_roll_acc : -180 - angle_roll_acc;
-    // discontinuity in the other axis when angles pass 90 degrees, go with the gyro calculation
-    angle_pitch_acc = angle_pitch;   angle_roll_acc = angle_roll;
-    
-  }
-  // Place the MPU-6050 spirit level and note the values in the following two lines for calibration
-  //  angle_pitch_acc -= 0.0;                              //Accelerometer calibration value for pitch
-  //  angle_roll_acc -= 0.0;                               //Accelerometer calibration value for roll
+   // working copy of the results
+   pitch = angle_pitch - WING_ANGLE;    // make the plane fly nose up by the desired wing angle amount
+   roll  = angle_roll;
 
 }
-#endif
+
+
+
+void ACCEL_process(){    // formulas allow pitch -90 to 90 and roll -180 to 180
+long v;                  // from :https://theccontinuum.com/2012/09/24/arduino-imu-pitch-roll-from-accelerometer/
+
+   v  = (long)acc_x * (long)acc_x;
+   v += (long)acc_z * (long)acc_z;
+   v = sqrt( v );
+   angle_pitch_acc = atan( (float)acc_y/(float)v ) * 57.296;
+   angle_roll_acc  = atan2( (float)acc_x,(float)acc_z ) * -57.296;
+     
+}
+
 
 // modified to write to serial instead of a I2C display
 void write_LCD(){
@@ -445,7 +385,7 @@ static int lcd_loop_counter;
 static int angle_pitch_buffer, angle_roll_buffer;
 
 
-  return;   // defeat this to see other debug printing
+  return; // defeat this to see other debug printing
   //To get a 250Hz program loop (4us) it's only possible to write one character per loop
   
   if(lcd_loop_counter == 14)lcd_loop_counter = 0;                      //Reset the counter after 14 characters
@@ -454,7 +394,7 @@ static int angle_pitch_buffer, angle_roll_buffer;
     angle_pitch_buffer = angle_pitch * 10;                      //Buffer the pitch angle because it will change
     // angle_pitch_buffer = (angle_pitch_acc - angle_pitch) * 10;
     // angle_pitch_buffer = angle_pitch_acc * 10;
-    // Serial.write(' '); Serial.println(acc_z);
+     //Serial.write(' '); Serial.println(angle_pitch_acc);
     Serial.println();
   }
   if(lcd_loop_counter == 2){
