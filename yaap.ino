@@ -24,8 +24,6 @@ const char mounting = UPRIGHT;     // pick one
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
 
-#define ACC_MAX_VALUE  4343.0f     // measured value of accelerometer readings
-
 #include <Wire.h>
 #include <Servo.h>
 #include <avr/interrupt.h>
@@ -46,11 +44,10 @@ uint8_t pwm_in, pwm_out;
 // IMU variables
 int16_t gyro_x, gyro_y, gyro_z;
 int16_t acc_x, acc_y, acc_z;
+float  fax, fay, faz;         // gyro updated faked acceleration values
 int16_t temperature;
 long gyro_x_cal, gyro_y_cal, gyro_z_cal;
 unsigned long IMU_timer;
-float angle_pitch, angle_roll;
-float angle_roll_acc, angle_pitch_acc;
 
 float pitch,roll;
 
@@ -69,11 +66,11 @@ void setup(){
   setup_mpu_6050_registers();         //Setup the registers of the MPU-6050 (500dfs / +/-8g) and start the gyro
   calibrate_gyro();
   
-  ACCEL_process();                    // initial position from the accelerometers, must be upright.
-  pitch = angle_pitch = angle_pitch_acc;  
-  roll = angle_roll = angle_roll_acc;
+  fax = acc_x;                        // initial position from the accelerometers
+  fay = acc_y;
+  faz = acc_z;
  
-  IMU_timer = micros();                                               //Reset the loop timer
+  IMU_timer = micros();                                   //Reset the loop timer
 
   aileron.attach(9);
   elevator.attach(10);
@@ -225,10 +222,10 @@ static int last_a, last_e;
    // 40% is -200,200  100% is -500,500
    // Can't use 100% as that may cancel completely any user inputs.
    a = map(roll*10,-900,900,200,-200);
-   e = map(pitch*10,-900,900,-200,200);
+   e = map((pitch-WING_ANGLE)*10,-900,900,-200,200);
 
-   // if upside down reverse the elevator, avoid split s into the ground, recover with aileron.
-   if( acc_z < 0 ) e = -e;
+   // if upside down, zero the elevator, avoid split s into the ground.
+   if( faz < 0 ) e = 0;
    
    // add in the user input.
    a += user_a;  e += user_e;
@@ -244,11 +241,11 @@ static int last_a, last_e;
    e = constrain(e,1000,2000);
 
    p = 0;
-   if( a != last_a ){
+   if( a < last_a -1 || a > last_a + 1 ){    // deadband
       aileron.writeMicroseconds(a);
       last_a = a; p = 1;
    }
-   if( e != last_e ){
+   if( e < last_e - 1 || e > last_e + 1 ){
       elevator.writeMicroseconds(e);
       last_e = e; p = 1;
    }
@@ -260,10 +257,81 @@ static int last_a, last_e;
 }
 
 
+void IMU_process(){
+long v;
+static uint8_t p;
+
+  if(micros() - IMU_timer < 5000) return;     // run at 200 hz rate, call as often as wanted
+  IMU_timer += 5000;                                           
+  
+  read_mpu_6050_data();                       // Read the raw acc and gyro data from the MPU-6050
+
+  gyro_x -= gyro_x_cal;                       // Subtract the calibration values
+  gyro_y -= gyro_y_cal;
+  gyro_z -= gyro_z_cal;
+
+  // rotate the gyro based coordinates using gyro data and small angle approximation.
+  //   65.5 is the gyro reading for 1 deg/second.  1 deg/57.3 is angular movement in radians
+  //   200 is the sample rate, but arduino clock may not be exactly 16mhz and vary with temperature.
+  // small angle approximations:
+  //   fastest we can measure is 500 deg/second full scale.  That is 2.5 degrees per sample which
+  //   is .04363 radians.  Sin is .043616, a very small error.
+  // roll interchanges x and z.
+  fax -= faz * (float)gyro_y * 0.00000133;      // empirical constant 00000127 to 00000138
+  faz += fax * (float)gyro_y * 0.00000133;      // 1 / ( 200 * 65.5 * 57.3 ) = 0.00000133
+  // pitch interchanges y and z.
+  fay += faz * (float)gyro_x * 0.00000133;
+  faz -= fay * (float)gyro_x * 0.00000133;
+  // yaw interchanges x and y.
+  fax += fay * (float)gyro_z * 0.00000133;
+  fay -= fax * (float)gyro_z * 0.00000133;
+
+   // set bounds on the values to prevent errors accumlating, should max about 1g on the 8g scale
+  fax = constrain( fax,-4500,4500 );
+  fay = constrain( fay,-4500,4500 );
+  faz = constrain( faz,-4500,4500 );
+  
+  // leak the accelerometer values into the gyro based ones to counter gyro drift and
+  // approximation errors
+  fax = 0.997 * fax + 0.003 * acc_x;
+  fay = 0.997 * fay + 0.003 * acc_y;
+  faz = 0.997 * faz + 0.003 * acc_z;
+
+  // calculate pitch and roll directly from the gyro based axis orientation
+   v = (long)fax * (long)fax + (long)faz * (long)faz;
+   v = sqrt( v );
+   if( v != 0 ) pitch = atan( fay/(float)v ) * 57.296;    // get values +- 90
+   if( faz != 0 ) roll = atan2( fax,faz ) * -57.296;      // get values +- 180
+  
+   if( DBUG  ){
+    //  ++p;
+    //  if( ( p & 15 ) == 0 ) {Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);}
+   }
+  //   ACCEL_process();
+
+}
+
+
+
+/**************
+void ACCEL_process(){    // formulas allow pitch -90 to 90 and roll -180 to 180
+long v;                  // from :https://theccontinuum.com/2012/09/24/arduino-imu-pitch-roll-from-accelerometer/
+
+   v  = (long)acc_x * (long)acc_x;
+   v += (long)acc_z * (long)acc_z;
+   v = sqrt( v );
+   if( v != 0 ) angle_pitch_acc = atan( (float)acc_y/(float)v ) * 57.296;
+   //v = abs(acc_z); // simplistic model where roll stays in quadrants 1 and 2
+                     // the simple model cannot determine if model is upside down.
+                     // use v in place of acc_z both places next line.
+   if( acc_z != 0 ) angle_roll_acc  = atan2( (float)acc_x,(float)acc_z ) * -57.296;
+     
+}
+**********************/
+
+
 /*   
-   MPU code from the below source, and modified where needed for this application
-   And perhaps bugs fixed or introduced.
-   
+   Original MPU code from the below source, and modified where needed.
    
 Website: http://www.brokking.net/imu.html
 Youtube: https://youtu.be/4BoIE8YQwM8
@@ -313,114 +381,4 @@ void setup_mpu_6050_registers(){
   Wire.write(0x1B);
   Wire.write(0x08);
   Wire.endTransmission();
-}
-
-
-void IMU_process(){
-
-  if(micros() - IMU_timer < 5000) return;   // run at 200 hz rate, call as often as wanted
-  IMU_timer += 5000;                                           
-  
-  read_mpu_6050_data();                              //Read the raw acc and gyro data from the MPU-6050
-
-  gyro_x -= gyro_x_cal;                       //Subtract the offset calibration value from the raw gyro_x value
-  gyro_y -= gyro_y_cal;                       //Subtract the offset calibration value from the raw gyro_y value
-  gyro_z -= gyro_z_cal;                       //Subtract the offset calibration value from the raw gyro_z value
-
-  //Gyro angle calculations
-  //0.0000611 = 1 / (250Hz / 65.5)
-  //0.0000763 = 1 / (200hz / 65.5)
-
-  angle_roll += (float)gyro_y * 0.0000763;   //Calculate the traveled roll angle  
-  if( acc_z >= 0 ){                              // upside right
-     angle_pitch += (float)gyro_x * 0.0000763;  //Calculate the traveled pitch angle
-  }
-  else{                                         // upside down
-     angle_pitch -= (float)gyro_x * 0.0000763;  //Calculate the traveled pitch angle
-  }
- 
-  // Yaw corrections
-  //0.000001066 = 0.0000611 * (3.142(PI) / 180degr) The Arduino sine function is in radians
-  // angle_pitch += angle_roll * sin(gyro_z * 0.000001066); // transfer the roll angle to the pitch angle
-  // angle_roll -= angle_pitch * sin(gyro_z * 0.000001066); // transfer the pitch angle to the roll angle
-  
-   angle_pitch += sin(angle_roll/57.3) * (float)gyro_z * 0.0000763;
-   angle_roll -=  sin(angle_pitch/57.3) * (float)gyro_z * 0.0000763;
-  
-   ACCEL_process();
-
-  // discontinuity at roll 180 degrees
-   if( angle_roll_acc - angle_roll > 180 ) angle_roll = angle_roll_acc;
-   if( angle_roll - angle_roll_acc > 180 ) angle_roll = angle_roll_acc;
-   
-   // Correct the drift of the gyro with ACCEL data
-   angle_pitch = angle_pitch * 0.995 + angle_pitch_acc * 0.005;    
-   angle_roll = angle_roll * 0.995 + angle_roll_acc * 0.005;
-  
-   if( DBUG ) write_LCD();              //Write the roll and pitch values to the LCD display
-   
-   // working copy of the results
-   pitch = angle_pitch - WING_ANGLE;    // make the plane fly nose up by the desired wing angle amount
-   roll  = angle_roll;
-
-}
-
-
-
-void ACCEL_process(){    // formulas allow pitch -90 to 90 and roll -180 to 180
-long v;                  // from :https://theccontinuum.com/2012/09/24/arduino-imu-pitch-roll-from-accelerometer/
-
-   v  = (long)acc_x * (long)acc_x;
-   v += (long)acc_z * (long)acc_z;
-   v = sqrt( v );
-   angle_pitch_acc = atan( (float)acc_y/(float)v ) * 57.296;
-   angle_roll_acc  = atan2( (float)acc_x,(float)acc_z ) * -57.296;
-     
-}
-
-
-// modified to write to serial instead of a I2C display
-void write_LCD(){
-static int lcd_loop_counter;
-static int angle_pitch_buffer, angle_roll_buffer;
-
-
-  return; // defeat this to see other debug printing
-  //To get a 250Hz program loop (4us) it's only possible to write one character per loop
-  
-  if(lcd_loop_counter == 14)lcd_loop_counter = 0;                      //Reset the counter after 14 characters
-  lcd_loop_counter ++;                                                 //Increase the counter
-  if(lcd_loop_counter == 1){
-    angle_pitch_buffer = angle_pitch * 10;                      //Buffer the pitch angle because it will change
-    // angle_pitch_buffer = (angle_pitch_acc - angle_pitch) * 10;
-    // angle_pitch_buffer = angle_pitch_acc * 10;
-     //Serial.write(' '); Serial.println(angle_pitch_acc);
-    Serial.println();
-  }
-  if(lcd_loop_counter == 2){
-    if(angle_pitch_buffer < 0)Serial.print("-");                          //Print - if value is negative
-    else Serial.print("+");                                               //Print + if value is negative
-  }
-  if(lcd_loop_counter == 3)Serial.print(abs(angle_pitch_buffer)/1000);    //Print first number
-  if(lcd_loop_counter == 4)Serial.print((abs(angle_pitch_buffer)/100)%10);//Print second number
-  if(lcd_loop_counter == 5)Serial.print((abs(angle_pitch_buffer)/10)%10); //Print third number
-  if(lcd_loop_counter == 6)Serial.print(".");                             //Print decimal point
-  if(lcd_loop_counter == 7)Serial.print(abs(angle_pitch_buffer)%10);      //Print decimal number
-
-  if(lcd_loop_counter == 8){
-    angle_roll_buffer = angle_roll * 10; 
-     // angle_roll_buffer = (angle_roll_acc - angle_roll) * 10;  // delta error gyro to acc
-     // angle_roll_buffer = angle_roll_acc * 10;
-    Serial.write(' ');
-  }
-  if(lcd_loop_counter == 9){
-    if(angle_roll_buffer < 0)Serial.print("-");                           //Print - if value is negative
-    else Serial.print("+");                                               //Print + if value is negative
-  }
-  if(lcd_loop_counter == 10)Serial.print(abs(angle_roll_buffer)/1000);    //Print first number
-  if(lcd_loop_counter == 11)Serial.print((abs(angle_roll_buffer)/100)%10);//Print second number
-  if(lcd_loop_counter == 12)Serial.print((abs(angle_roll_buffer)/10)%10); //Print third number
-  if(lcd_loop_counter == 13)Serial.print(".");                            //Print decimal point
-  if(lcd_loop_counter == 14)Serial.print(abs(angle_roll_buffer)%10);      //Print decimal number
-  
 }
