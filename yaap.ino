@@ -18,18 +18,22 @@
 #define INVERTED_ 1
 #define LEFT_SIDE 2
 #define RIGHT_SIDE 3
-const char mounting = UPRIGHT;     // pick one
+const char mounting = INVERTED_;     // pick one
 
-#define WING_ANGLE 5.0             // desired trim pitch ( wing attack angle )
+#define WING_ANGLE -4.4            // mounting adjustment and desired trim pitch ( wing attack angle )
+#define ROLL_ANGLE  2.0            // mounting adjustment
+
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
+#define GIMBAL_REVERSE 0
 
 #include <Wire.h>
 #include <Servo.h>
 #include <avr/interrupt.h>
 
-Servo aileron;    // actually rudder for the test airplane
+Servo aileron;    // or rudder for 3 channel airplane
 Servo elevator;
+Servo gimbal;
 
 int user_a, user_e, user_g;   // user radio control inputs
 
@@ -43,8 +47,8 @@ uint8_t pwm_in, pwm_out;
 
 // IMU variables
 int16_t gyro_x, gyro_y, gyro_z;
-int16_t acc_x, acc_y, acc_z;
-float  fax, fay, faz;         // gyro updated faked acceleration values
+int16_t acc_x, acc_y, acc_z;      // accelerometer coordinates
+float  fax, fay, faz;             // gyro based accel coordinates.  Less noise.
 int16_t temperature;
 long gyro_x_cal, gyro_y_cal, gyro_z_cal;
 unsigned long IMU_timer;
@@ -74,9 +78,10 @@ void setup(){
 
   aileron.attach(9);
   elevator.attach(10);
-  // gimbal.attach(8);
+  gimbal.attach(8);
   aileron.writeMicroseconds(1500);
   elevator.writeMicroseconds(1500);
+  gimbal.writeMicroseconds(1500);
 
   // user radio inputs.  Not sure the best way to do pin change interrupts so try this way.
   // Some info about attach_interrupt on internet seems outdated.  This is UNO specific code.  
@@ -221,7 +226,7 @@ static int last_a, last_e;
    // Set Proportional gain with the servo travel desired for +- 90 degrees tilt
    // 40% is -200,200  100% is -500,500
    // Can't use 100% as that may cancel completely any user inputs.
-   a = map(roll*10,-900,900,200,-200);
+   a = map((roll-ROLL_ANGLE)*10,-900,900,200,-200);
    e = map((pitch-WING_ANGLE)*10,-900,900,-200,200);
 
    // if upside down, zero the elevator, avoid split s into the ground.
@@ -243,6 +248,7 @@ static int last_a, last_e;
    p = 0;
    if( a < last_a -1 || a > last_a + 1 ){    // deadband
       aileron.writeMicroseconds(a);
+      // gimbal.writeMicroseconds(a);             // for testing
       last_a = a; p = 1;
    }
    if( e < last_e - 1 || e > last_e + 1 ){
@@ -251,15 +257,17 @@ static int last_a, last_e;
    }
 
    if( DBUG && p ){
-     Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
+     //Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
    }
   
 }
 
-
+// we are maintaining two gravity based coordinate systems.  One is simply the accelerometer data.
+// The second is updated using the gyro data and will have less noise than the accelerometers.
 void IMU_process(){
 long v;
 static uint8_t p;
+float s,c,t;
 
   if(micros() - IMU_timer < 5000) return;     // run at 200 hz rate, call as often as wanted
   IMU_timer += 5000;                                           
@@ -272,19 +280,28 @@ static uint8_t p;
 
   // rotate the gyro based coordinates using gyro data and small angle approximation.
   //   65.5 is the gyro reading for 1 deg/second.  1 deg/57.3 is angular movement in radians
-  //   200 is the sample rate, but arduino clock may not be exactly 16mhz and vary with temperature.
-  // small angle approximations:
+  //   200 is the sample rate
+  // small angle approximations:   The largest errors possible are:
   //   fastest we can measure is 500 deg/second full scale.  That is 2.5 degrees per sample which
-  //   is .04363 radians.  Sin is .043616, a very small error.
+  //   is .04363 radians.  Sin is .043616.  Cos is .999, approximation for cos is 0.998
   // roll interchanges x and z.
-  fax -= faz * (float)gyro_y * 0.00000133;      // empirical constant 00000127 to 00000138
-  faz += fax * (float)gyro_y * 0.00000133;      // 1 / ( 200 * 65.5 * 57.3 ) = 0.00000133
+  s = (float)gyro_y * 0.00000128;               // 1 / ( 200 * 65.5 * 57.3 ) = 0.00000133
+  c = 1.0 - ( s * s ) / 2.0;                    // empirical value 00000128 works best for roll
+  t = fax;
+  fax = c * fax - faz * s;
+  faz = c * faz + t * s;                                 
   // pitch interchanges y and z.
-  fay += faz * (float)gyro_x * 0.00000133;
-  faz -= fay * (float)gyro_x * 0.00000133;
+  s = (float)gyro_x * 0.00000132;
+  c = 1.0 - ( s * s ) / 2.0;
+  t = fay; 
+  fay = c * fay + faz * s;
+  faz = c * faz - t * s;
   // yaw interchanges x and y.
-  fax += fay * (float)gyro_z * 0.00000133;
-  fay -= fax * (float)gyro_z * 0.00000133;
+  s = (float)gyro_z * 0.00000133;
+  c = 1.0 - ( s * s ) / 2.0;
+  t = fax;
+  fax = c * fax + fay * s;
+  fay = c * fay - t * s;
 
    // set bounds on the values to prevent errors accumlating, should max about 1g on the 8g scale
   fax = constrain( fax,-4500,4500 );
@@ -293,26 +310,70 @@ static uint8_t p;
   
   // leak the accelerometer values into the gyro based ones to counter gyro drift and
   // approximation errors
-  fax = 0.997 * fax + 0.003 * acc_x;
-  fay = 0.997 * fay + 0.003 * acc_y;
-  faz = 0.997 * faz + 0.003 * acc_z;
+  fax = 0.995 * fax + 0.005 * acc_x;
+  fay = 0.995 * fay + 0.005 * acc_y;
+  faz = 0.995 * faz + 0.005 * acc_z;
 
   // calculate pitch and roll directly from the gyro based axis orientation
    v = (long)fax * (long)fax + (long)faz * (long)faz;
    v = sqrt( v );
    if( v != 0 ) pitch = atan( fay/(float)v ) * 57.296;    // get values +- 90
    if( faz != 0 ) roll = atan2( fax,faz ) * -57.296;      // get values +- 180
+
+  // run the gimbal processing
+  gimbal_process( gyro_z );
   
    if( DBUG  ){
-    //  ++p;
-    //  if( ( p & 15 ) == 0 ) {Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);}
+      ++p;
+      if( ( p & 31 ) == 0 ) {
+        //Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
+        //Serial.print((int)fax); Serial.write(' '); Serial.print((int)fay);
+        //Serial.write(' '); Serial.println((int)faz);
+        }
    }
-  //   ACCEL_process();
-
 }
 
 
+// yaw servo gimbal
+void gimbal_process( int16_t val ){
+float w0;
+float val_out;
+//const float a0 = 0.894859;        // butterworth 5hz highpass constants, 200 hz sample rate
+//const float a1 = 1.778632;
+//const float a2 = -0.800803;
+//const float b1 = -2.0;
+//const float b2 = 1.0;
+//static float w1,w2;
+static uint8_t mod;
+static float yaw;
+float angle_out;
 
+    ++mod;            // 50 hz rate for writing the servo's
+    mod &= 3;
+    
+    // high pass filter the data so normal turn rates are filtered out leaving just unwanted flight
+    // oscillations such as dutch roll to be countered by the camera gimbal
+    // w0 = a0 * (float)val + a1 * w1 + a2 * w2;
+    // val_out = w0 + b1 * w1 + b2 * w2;
+    // w2 = w1; w1 = w0;                      // move delay terms 
+    // the filter is too agressive or implemented incorrectly.  The integral leak works almost as desired
+    // and mixing a bit of aileron into the gimbal channel will counter the lag in the gimbal when
+    // making an actual turn.   
+
+    val_out = val;                            // filter bypass
+    yaw += val_out * (0.00000133 * 57.3);     // angle in degrees
+    angle_out = map( user_a,-500,500,-30,30); // leak toward user_a, adjust for desired gain
+    yaw -= 0.01 * (yaw-angle_out);            // leak the integral toward zero.( leak toward user_a  )
+    // merge the user input and write the servo at 50 hz rate
+    if( mod == 0 ){
+       angle_out = map( user_g,-500,500,-60,60 );
+       angle_out += yaw;
+       if( GIMBAL_REVERSE ) angle_out = -angle_out;
+       angle_out = constrain(angle_out,-60,60);
+       gimbal.write(90+angle_out);
+       if( DBUG ) Serial.println( angle_out );
+    }
+}
 /**************
 void ACCEL_process(){    // formulas allow pitch -90 to 90 and roll -180 to 180
 long v;                  // from :https://theccontinuum.com/2012/09/24/arduino-imu-pitch-roll-from-accelerometer/
