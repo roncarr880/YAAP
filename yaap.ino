@@ -8,11 +8,11 @@
  *    Current target airframe is a 3 channel slow stick - using rudder to control roll.
  *    Goal is to control rudder, elevator and a servo driven 1 axis camera gimbal ( yaw ).
  *    
- *    Increasing servo pulse width coded to pitch down and roll right.
+ *    Increasing servo pulse width coded to pitch down and roll right. Set TX to work as such.
  *    Servo's should be reversed here and not in the transmitter.
  */
 
-#define DBUG 1    // for serial prints
+#define DBUG 0    // for serial prints
 
 #define UPRIGHT 0  // mounting orientation, Y axis is always towards the front
 #define INVERTED_ 1
@@ -20,8 +20,8 @@
 #define RIGHT_SIDE 3
 const char mounting = INVERTED_;     // pick one
 
-#define WING_ANGLE -4.4            // mounting adjustment and desired trim pitch ( wing attack angle )
-#define ROLL_ANGLE  2.0            // mounting adjustment
+#define WING_ANGLE -2.4            // mounting adjustment and desired trim pitch (-4.4 last flight )
+#define ROLL_ANGLE  3.0            // mounting adjustment
 
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
@@ -106,8 +106,12 @@ ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver 
 
 void user_process(){    // decode the pwm servo data received, set the user variables to new values
                         // sanity check the data and ignore anything wrong
+                        // use trend to filter out spurious signals probably caused by variations in
+                        // interrupt latency ( algorithm seems to be working )
 static uint8_t last_bit[3];
 static unsigned long last_time[3];
+static int trend_val[3];
+static int8_t trend_cnt[3];
 int8_t mask,b,i;
 unsigned long dt;
 int us;  
@@ -125,15 +129,21 @@ int us;
             dt = pwm_values[pwm_out].timer - last_time[i];
             us = dt;                       // make a signed copy
             if( dt > 800 && dt < 2200 ){   // test the unsigned long version as a sanity check
-               us -= 1500;                        // sub out the zero point, get -500 to 500 in values
-               switch(i){
-                  case 0:  user_a = us; break;    // ailerons
-                  case 1:  user_e = us; break;    // elevator
-                  case 2:  user_g = us; break;    // camera gimbal
+               us -= 1500;                                 // sub out the zero point, get -500 to 500 in values
+               if( us > trend_val[i]+1 ) ++trend_cnt[i];   // look for a trend, 1us deadband.
+               if( us < trend_val[i]-1 ) --trend_cnt[i];
+               if( trend_cnt[i] > 2 || trend_cnt[i] < -2 ){    // looks like real user input
+                  trend_cnt[i] = 0;
+                  trend_val[i] = us;   
+                  switch(i){
+                     case 0:  user_a = us; break;    // ailerons
+                     case 1:  user_e = us; break;    // elevator
+                     case 2:  user_g = us; break;    // camera gimbal
+                  }
                }  
-            }
-         }
-     }       // end bit change
+            }  // end sanity check
+         }   // end else
+     }     // end bit change
      mask <<= 1;   // next bit
   }                // next i
   
@@ -226,7 +236,7 @@ static int last_a, last_e;
    // Set Proportional gain with the servo travel desired for +- 90 degrees tilt
    // 40% is -200,200  100% is -500,500
    // Can't use 100% as that may cancel completely any user inputs.
-   a = map((roll-ROLL_ANGLE)*10,-900,900,200,-200);
+   a = map((roll-ROLL_ANGLE)*10,-900,900,250,-250);
    e = map((pitch-WING_ANGLE)*10,-900,900,-200,200);
 
    // if upside down, zero the elevator, avoid split s into the ground.
@@ -248,7 +258,6 @@ static int last_a, last_e;
    p = 0;
    if( a < last_a -1 || a > last_a + 1 ){    // deadband
       aileron.writeMicroseconds(a);
-      // gimbal.writeMicroseconds(a);             // for testing
       last_a = a; p = 1;
    }
    if( e < last_e - 1 || e > last_e + 1 ){
@@ -257,13 +266,14 @@ static int last_a, last_e;
    }
 
    if( DBUG && p ){
-     //Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
+    // Serial.print("E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
    }
   
 }
 
-// we are maintaining two gravity based coordinate systems.  One is simply the accelerometer data.
-// The second is updated using the gyro data and will have less noise than the accelerometers.
+// we are maintaining a gravity based coordinate system. 
+// It is updated/rotated using the gyro data and corrected with the accelerometers.
+// The object is to reduce the noise from accelerometers, g-forces from movement, and vibration of the airframe.
 void IMU_process(){
 long v;
 static uint8_t p;
@@ -278,12 +288,13 @@ float s,c,t;
   gyro_y -= gyro_y_cal;
   gyro_z -= gyro_z_cal;
 
-  // rotate the gyro based coordinates using gyro data and small angle approximation.
+  // rotate the gyro based gravity coordinates using gyro data and small angle approximation.
   //   65.5 is the gyro reading for 1 deg/second.  1 deg/57.3 is angular movement in radians
   //   200 is the sample rate
-  // small angle approximations:   The largest errors possible are:
+  // small angle approximations:  sin(a) = a,  cos(a) = 1 - a*a/2  ,angles in radians.
+  // The largest errors possible are:
   //   fastest we can measure is 500 deg/second full scale.  That is 2.5 degrees per sample which
-  //   is .04363 radians.  Sin is .043616.  Cos is .999, approximation for cos is 0.998
+  //   is .04363 radians.  Sin is .043616.  Cos is .999048, approximation for cos is 0.999048
   // roll interchanges x and z.
   s = (float)gyro_y * 0.00000128;               // 1 / ( 200 * 65.5 * 57.3 ) = 0.00000133
   c = 1.0 - ( s * s ) / 2.0;                    // empirical value 00000128 works best for roll
@@ -314,7 +325,8 @@ float s,c,t;
   fay = 0.995 * fay + 0.005 * acc_y;
   faz = 0.995 * faz + 0.005 * acc_z;
 
-  // calculate pitch and roll directly from the gyro based axis orientation
+  // calculate pitch and roll directly from the gyro based axis orientation just as one would with
+  // accelerometer values
    v = (long)fax * (long)fax + (long)faz * (long)faz;
    v = sqrt( v );
    if( v != 0 ) pitch = atan( fay/(float)v ) * 57.296;    // get values +- 90
@@ -326,7 +338,7 @@ float s,c,t;
    if( DBUG  ){
       ++p;
       if( ( p & 31 ) == 0 ) {
-        //Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
+        Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
         //Serial.print((int)fax); Serial.write(' '); Serial.print((int)fay);
         //Serial.write(' '); Serial.println((int)faz);
         }
@@ -356,22 +368,26 @@ float angle_out;
     // w0 = a0 * (float)val + a1 * w1 + a2 * w2;
     // val_out = w0 + b1 * w1 + b2 * w2;
     // w2 = w1; w1 = w0;                      // move delay terms 
-    // the filter is too agressive or implemented incorrectly.  The integral leak works almost as desired
-    // and mixing a bit of aileron into the gimbal channel will counter the lag in the gimbal when
-    // making an actual turn.   
+    // the filter is too agressive or implemented incorrectly.  The integral leak works almost as desired.   
 
     val_out = val;                            // filter bypass
-    yaw += val_out * (0.00000133 * 57.3);     // angle in degrees
-    angle_out = map( user_a,-500,500,-30,30); // leak toward user_a, adjust for desired gain
-    yaw -= 0.01 * (yaw-angle_out);            // leak the integral toward zero.( leak toward user_a  )
+    yaw += val_out * (0.00000133 * 57.3);     // integrate yaw giving angle in degrees
+    angle_out = (roll-ROLL_ANGLE)*0.6;        // leak toward the roll angle. Look where you are going.
+    yaw -= 0.01 * (yaw-angle_out);            // leak the integral toward roll.
     // merge the user input and write the servo at 50 hz rate
+    // servo seems to have a step response when writing angles, try using microseconds
+    // perhaps the issue originates with the map function since it is long integer math
     if( mod == 0 ){
-       angle_out = map( user_g,-500,500,-60,60 );
-       angle_out += yaw;
+       //angle_out = map( user_g,-500,500,-60,60 );
+       angle_out = map( yaw*10,-600,600,-500,500 );   // use *10 for more map func resolution
+       //angle_out += yaw;
+       angle_out += user_g;
        if( GIMBAL_REVERSE ) angle_out = -angle_out;
-       angle_out = constrain(angle_out,-60,60);
-       gimbal.write(90+angle_out);
-       if( DBUG ) Serial.println( angle_out );
+       //angle_out = constrain(angle_out,-60,60);
+       angle_out = constrain(angle_out,-500,500);
+       //gimbal.write(90+angle_out);
+       gimbal.writeMicroseconds(1500+angle_out);
+       //if( DBUG ) Serial.println( angle_out );
     }
 }
 /**************
