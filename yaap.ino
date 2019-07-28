@@ -18,14 +18,14 @@
 #define INVERTED_ 1
 #define LEFT_SIDE 2
 #define RIGHT_SIDE 3
-const char mounting = INVERTED_;     // pick one
+const char mounting = UPRIGHT;     // pick one of the above
 
 #define WING_ANGLE -2.4            // mounting adjustment and desired trim pitch (-4.4 last flight )
-#define ROLL_ANGLE  5.6            // mounting adjustment
+#define ROLL_ANGLE -0.85           // mounting adjustment ( 5.6 when arduino was upright )
 
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
-#define GIMBAL_REVERSE 0
+#define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
 #include <Wire.h>
 #include <Servo.h>
@@ -58,7 +58,14 @@ float pitch,roll;
 /********************************************************************************/
 
 void setup(){
-  
+
+  aileron.attach(9);
+  elevator.attach(10);
+  gimbal.attach(8);
+  aileron.writeMicroseconds(1500);
+  elevator.writeMicroseconds(1500);
+  gimbal.writeMicroseconds(1500);
+
   Wire.begin();                                          //Start I2C as master
   if( DBUG ){
      Serial.begin(57600);                                //Use only for debugging
@@ -76,12 +83,6 @@ void setup(){
  
   IMU_timer = micros();                                   //Reset the loop timer
 
-  aileron.attach(9);
-  elevator.attach(10);
-  gimbal.attach(8);
-  aileron.writeMicroseconds(1500);
-  elevator.writeMicroseconds(1500);
-  gimbal.writeMicroseconds(1500);
 
   // user radio inputs.  Not sure the best way to do pin change interrupts so try this way.
   // Some info about attach_interrupt on internet seems outdated.  This is UNO specific code.  
@@ -106,12 +107,8 @@ ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver 
 
 void user_process(){    // decode the pwm servo data received, set the user variables to new values
                         // sanity check the data and ignore anything wrong
-                        // use trend to filter out spurious signals probably caused by variations in
-                        // interrupt latency ( algorithm seems to be working )
 static uint8_t last_bit[3];
 static unsigned long last_time[3];
-static int trend_val[3];
-static int8_t trend_cnt[3];
 int8_t mask,b,i;
 unsigned long dt;
 int us;  
@@ -129,17 +126,12 @@ int us;
             dt = pwm_values[pwm_out].timer - last_time[i];
             us = dt;                       // make a signed copy
             if( dt > 800 && dt < 2200 ){   // test the unsigned long version as a sanity check
-               us -= 1500;                                 // sub out the zero point, get -500 to 500 in values
-               if( us > trend_val[i]+1 ) ++trend_cnt[i];   // look for a trend, 1us deadband.
-               if( us < trend_val[i]-1 ) --trend_cnt[i];
-               if( trend_cnt[i] > 2 || trend_cnt[i] < -2 ){    // looks like real user input
-                  trend_cnt[i] = 0;
-                  trend_val[i] = us;   
-                  switch(i){
-                     case 0:  user_a = us; break;    // ailerons
-                     case 1:  user_e = us; break;    // elevator
-                     case 2:  user_g = us; break;    // camera gimbal
-                  }
+               us -= 1500;                 // sub out the zero point, get -500 to 500 in values
+               us = median(i,us);          // discard glitches ( from interrupt latency I think )
+               switch(i){
+                  case 0:  user_a = us; break;    // ailerons
+                  case 1:  user_e = us; break;    // elevator
+                  case 2:  user_g = us; break;    // camera gimbal
                }  
             }  // end sanity check
          }   // end else
@@ -150,6 +142,27 @@ int us;
   ++pwm_out;                   // done processing this entry
   pwm_out &= 7;
 }
+
+// return the median value of the last 3 to ignore outliers in the data stream
+// store data for 3 channels
+int median( int8_t ch, int val ){
+static int vals[3][3];
+static int8_t in[3];
+int8_t j,i,k;                                  // low, median, high
+
+   vals[ch][in[ch]] = val;                     // save the new value
+   ++in[ch];
+   if( in[ch] > 2 ) in[ch] = 0;
+
+   j = 0, i = 1, k = 2;                             // pretend they are in the correct order
+   if( vals[ch][j] > vals[ch][k] ) k = 0, j = 2;    // swap guess high and low
+   if( vals[ch][i] < vals[ch][j] ) i = j;           // is lower than the low guess, pick that one instead
+   if( vals[ch][i] > vals[ch][k] ) i = k;           // is higher than the high guess
+
+   return vals[ch][i];
+}
+
+
 
 void loop(){
 
@@ -225,6 +238,7 @@ int16_t temp;
 
 void servo_process(){    // write the servo's every 20 ms
 static unsigned long timer;
+static int yaw_I;    
 int a,e;
 
 
@@ -238,6 +252,15 @@ int a,e;
    // Can't use 100% as that may cancel completely any user inputs.
    a = map((roll-ROLL_ANGLE)*10,-900,900,250,-250);
    e = map((pitch-WING_ANGLE)*10,-900,900,-200,200);
+
+   // accelerometers will see a banked turn as flying upright
+   // integrate the yaw rotation to counter this effect
+   // apply to aileron.  range 160 / 50hz --> 3 second time constant.  Watch flight for signs of oscillation.
+   if( gyro_z < -20 ) --yaw_I;
+   if( gyro_z > 20 ) ++yaw_I;
+   yaw_I = constrain(yaw_I,-80,80);   //  adjust range for the time constant
+   a += (yaw_I >> 2);                 //  and divide to get +- 20 max, a very small surface movement
+
 
    // if upside down, zero the elevator, avoid split s into the ground.
    if( faz < 0 ) e = 0;
@@ -325,12 +348,12 @@ float s,c,t;
    if( faz != 0 ) roll = atan2( fax,faz ) * -57.296;      // get values +- 180
 
   // run the gimbal processing
-  gimbal_process( gyro_z );
+  gimbal_process2( gyro_z );
   
    if( DBUG  ){
       ++p;
       if( ( p & 31 ) == 0 ) {
-        Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
+        //Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
         //Serial.print((int)fax); Serial.write(' '); Serial.print((int)fay);
         //Serial.write(' '); Serial.println((int)faz);
         }
@@ -338,13 +361,16 @@ float s,c,t;
 }
 
 
-// yaw servo gimbal,  parallax 360 feedback servo
+// yaw servo camera gimbal,  parallax 360 feedback servo. Rotational rate algorithm.
 void gimbal_process2( int16_t val ){
-int rpm;
+float rpm;
+float r;
+float bank;
 int us;
 static uint8_t mod;
-int zero,pos;
-float r;
+int pos;
+
+static int8_t p;
 
   // only need to do this at the 50 hz rate
   ++mod;
@@ -352,35 +378,46 @@ float r;
   if( mod == 0 ){
 
      // 393 is the gyro reading for 6 deg/sec or 1 rpm
-     // match the rotational rate
-     rpm = val / 393;                                  // !!! reverse here if just the correction is wrong way
-     us  = map( rpm,-150,150,1280-1500,1720-1500 );    // values from servo spec, removing the zero amount of 1500
-     // can reduce the deadband by adding or subbing a small value
-     if( us > 5 ) us += 15;
-     if( us < -5 ) us -= 15;
-     
-     // vary the zero value depending upon the roll angle
-     r = roll - ROLL_ANGLE;                            
-     zero = 338 + r * 2.0;                             // gain factor
-     // find the error between zero and the feedback signal and apply correction
+     // calculate what rate we think the servo should turn
+
+     rpm = (float)val / 393.0;                      // match the yaw rotational rate for the gimbal function
+     rpm += float(user_g)  * ( 15.0/500.0);         // map user input to max 15 rpm
+
+     // add a small restoring rpm toward zero value ( 338 was aligned straight ahead )
+     // the feedback signal is wired via a 1k resistor to pin A3 with 3.3uf to ground
      pos = analogRead(A3);
-     zero -= pos;                                      // get error
-     zero = constrain(zero,-60,60);                    // limit slew rate for this ( +-20 will be deadband )
-     us += zero;
+     rpm += (float)( 338 - pos ) * .015;
 
+     // add a look where you are going based upon the aileron control and current servo rotation
+     if( user_a > 20 || user_a < -20 ){              // deadband for trim
+        bank = (float)user_a/2.0 + 338;              // where we think we should look
+        r = float(user_a) * ( 15.0/500.0 );          // get a rpm from the stick input as variable r
+        r = abs(r);                                  // always rotate toward the calculated bank even if backwards to stick
+        bank = bank - (float)pos;                    // get the error and sign of the rotation
+        r *= bank/100.0;                             // shrink r to zero if we are looking there
+        rpm += r;
+     }
      
-     us  += user_g/4;                                  // add in the user control ( rate )
-                                                       // this will be a non-return to zero rotation
-                                                           
-     // avoid 360 degree rotations
-     //if( pos < 60 ) us = constrain(us, 0, 400 );   // !!! testing without this, then check if sign is correct
-     //if( pos > 615 ) us = constrain(us, -400, 0 );
+     // calc the servo command wanted, remove the servo deadband     32 -19 for 7.5 volts. 35 -22 for 5 v
+     if( rpm >= 1.0 )        us = map( rpm, 0,140, 35,220 );    // replace +-20 with actual deadband found by experiment
+     else if( rpm < -1.0 )   us = map( rpm, 0,-140, -22,-220);  // need to calibrate map for voltage applied to the servo
+     else                    us = 0;                            // turns too fast at 7.5 volts
+                                                            
      
-     if( GIMBAL_REVERSE ) us = -us;
-     us = constrain(us , -220, 220 );       // servo control limits from spec, this is a rate command 
-                                                  // not a position command like a regular servo
+     // avoid 360 degree rotations if we have a video out cable attached
+     if( pos < 70 ) us = constrain(us, 0, 400 );
+     if( pos > 605 ) us = constrain(us, -400, 0 );
+     
+     if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
+     us = constrain(us , -220, 220 );    // keep rate in servo active area
 
-     gimbal.writeMicroseconds( 1500 + us );                                           
+     gimbal.writeMicroseconds( 1500 + us ); 
+
+     if( ++p > 16 ){
+        p = 0;
+        if( DBUG )Serial.print(pos); Serial.write(' '); Serial.print(rpm); Serial.write(' ');\
+              Serial.print(-us); Serial.write(' '); Serial.println(roll); 
+     }                                         
   }
 }
 
