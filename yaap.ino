@@ -348,7 +348,7 @@ float s,c,t;
    if( faz != 0 ) roll = atan2( fax,faz ) * -57.296;      // get values +- 180
 
   // run the gimbal processing
-  gimbal_process2( gyro_z );
+  gimbal_process3( gyro_z );
   
    if( DBUG  ){
       ++p;
@@ -361,22 +361,34 @@ float s,c,t;
 }
 
 
-// yaw servo camera gimbal,  parallax 360 feedback servo. Rotational rate algorithm.
-void gimbal_process2( int16_t val ){
+// yaw servo camera gimbal,  parallax 360 feedback servo. Rotational rate algorithm 2.
+void gimbal_process3( int16_t val ){
 float rpm;
-float r;
-float bank;
 int us;
-static uint8_t mod;
 int pos;
-
+int i;
+static int vals[4];
+static int poss[4];
+static uint8_t mod;
 static int8_t p;
+static float fpos = 338.0;
+static float old_rpm;
 
-  // only need to do this at the 50 hz rate
+  vals[mod] = highpass(val);
+  poss[mod] = analogRead(A3);
   ++mod;
   mod &= 3;
-  if( mod == 0 ){
+  if( mod == 0 ){                         // only need to do this at the 50 hz rate
 
+     pos = val = 2;                       // get average values
+     for( i = 0; i < 4; ++i ){
+        pos += poss[i];
+        val += vals[i];
+     }
+     pos >>= 2;
+     val >>= 2;
+     // val = highpass(val);              // if use the 50hz rate constants
+     
      // 393 is the gyro reading for 6 deg/sec or 1 rpm
      // calculate what rate we think the servo should turn
 
@@ -385,29 +397,31 @@ static int8_t p;
 
      // add a small restoring rpm toward zero value ( 338 was aligned straight ahead )
      // the feedback signal is wired via a 1k resistor to pin A3 with 3.3uf to ground
-     pos = analogRead(A3);
-     rpm += (float)( 338 - pos ) * .015;
+     rpm += (float)( 338 - pos ) * 0.02;
 
-     // add a look where you are going based upon the aileron control and current servo rotation
-     if( user_a > 20 || user_a < -20 ){              // deadband for trim
-        bank = (float)user_a/2.0 + 338;              // where we think we should look
-        r = float(user_a) * ( 15.0/500.0 );          // get a rpm from the stick input as variable r
-        r = abs(r);                                  // always rotate toward the calculated bank even if backwards to stick
-        bank = bank - (float)pos;                    // get the error and sign of the rotation
-        r *= bank/100.0;                             // shrink r to zero if we are looking there
-        rpm += r;
-     }
+     // add a correction due to the difference in the position and the calculated future position
+     rpm -= 0.03 * ( (float)pos - fpos );  // small factor due to overshoot, filter cap on A3 delays actual pos value
      
-     // calc the servo command wanted, remove the servo deadband     32 -19 for 7.5 volts. 35 -22 for 5 v
-     if( rpm >= 1.0 )        us = map( rpm, 0,140, 35,220 );    // replace +-20 with actual deadband found by experiment
-     else if( rpm < -1.0 )   us = map( rpm, 0,-140, -22,-220);  // need to calibrate map for voltage applied to the servo
-     else                    us = 0;                            // turns too fast at 7.5 volts
+     // calc the servo command wanted, remove the servo deadband
+     us = 1.2 * rpm;                    // 1.2 without fpos
+     if( rpm >= 1.0 )      us += 32;    // actual servo deadband found by experiment
+     else if( rpm < -1.0 ) us -= 19; 
+     else                  us = 0;
                                                             
-     
-     // avoid 360 degree rotations if we have a video out cable attached
+     // avoid 360 degree rotations in case we have a video out cable attached
      if( pos < 70 ) us = constrain(us, 0, 400 );
      if( pos > 605 ) us = constrain(us, -400, 0 );
-     
+
+     // calc where we think the position should be for next time, future position.
+     // 660 analog read units for a rotation, 3000 samples in a minute --> 0.22 factor
+     if( us != 0 ){
+        fpos +=  0.11 * rpm ;     // add in half of this one, reduce overshoot
+        fpos +=  0.11 * old_rpm;  // add in half of the last one to account for delay due to averaging analog reads
+     }
+     old_rpm = rpm;
+     fpos = 0.99*fpos + 0.01*(float)pos; // converge the future and actual servo position values
+     fpos = constrain(fpos,6,660);
+          
      if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
      us = constrain(us , -220, 220 );    // keep rate in servo active area
 
@@ -415,58 +429,44 @@ static int8_t p;
 
      if( ++p > 16 ){
         p = 0;
-        if( DBUG )Serial.print(pos); Serial.write(' '); Serial.print(rpm); Serial.write(' ');\
-              Serial.print(-us); Serial.write(' '); Serial.println(roll); 
-     }                                         
+        if( DBUG ){
+          // Serial.println( fpos - (float)pos );
+        }              
+     }
+                                              
   }
 }
 
 
-// yaw servo gimbal, standard servo
-void gimbal_process( int16_t val ){
-//float w0;
-float val_out;
-//const float a0 = 0.894859;        // butterworth 5hz highpass constants, 200 hz sample rate
-//const float a1 = 1.778632;
-//const float a2 = -0.800803;
-//const float b1 = -2.0;
-//const float b2 = 1.0;
-//static float w1,w2;
-//static uint8_t mod;
-static float yaw;
-float roll_out;
-int angle_out;
-//static int current_angle;
-//static int active;
-//static int last_user_g;
-
- //   ++mod;            // 50 hz rate for writing the servo's
- //   mod &= 3;
+int16_t highpass( int16_t val ){
+float w0;
+int16_t val_out;
+//const float a0 = 0.98238544;        // butterworth 0.20hz highpass constants, 50 hz sample rate
+//const float a1 = 1.9644605802;
+//const float a2 = -0.9650811739;
+const float a0 = 0.994461842;        // butterworth 0.25hz highpass constants, 200 hz sample rate
+const float a1 = 1.9888929059;
+const float a2 = -0.9889542499;
+const float b1 = -2.0;
+const float b2 = 1.0;
+static float w1,w2;
+static uint8_t p;
     
     // high pass filter the data so normal turn rates are filtered out leaving just unwanted flight
     // oscillations such as dutch roll to be countered by the camera gimbal
-    // w0 = a0 * (float)val + a1 * w1 + a2 * w2;
-    // val_out = w0 + b1 * w1 + b2 * w2;
-    // w2 = w1; w1 = w0;                      // move delay terms 
-    // the filter is too agressive or implemented incorrectly.  The integral leak works almost as desired.   
+     w0 = a0 * (float)val + a1 * w1 + a2 * w2;
+     val_out = w0 + b1 * w1 + b2 * w2;
+     w2 = w1;                 // move delay terms
+     w1 = w0;
 
-    val_out = val;                            // filter bypass
-    yaw += val_out * (0.00000133 * 57.3);     // integrate yaw giving angle in degrees
-    roll_out = (roll-ROLL_ANGLE)*0.75;        // leak toward the roll angle. Look where you are going.
-    yaw -= 0.006 * (yaw-roll_out);            // leak the integral toward roll.
-
-    // merge the user input
-
-       angle_out = map( user_g,-500,500,-60,60 );
-       angle_out += yaw;     
-       if( GIMBAL_REVERSE ) angle_out = -angle_out;
-       angle_out = constrain(angle_out,-60,60);
-       // !!! maybe should process before adding in the 90 offset value
-       // PID control or match the rate of change
-       // one_shot = angle_out + 90;   change to a +- 500us value
-       angle_out = map( angle_out,-90,90,-500,500 );
-       gimbal.writeMicroseconds(1500+angle_out);
-
+     if( ++p > 32 ){
+        p = 0;
+        if( DBUG ){
+           Serial.print( val );   Serial.write(' ');
+           Serial.println(val_out);
+        }
+     }
+     return val_out;
 }
 
 
@@ -539,3 +539,167 @@ void setup_mpu_6050_registers(){
   Wire.write(0x08);
   Wire.endTransmission();
 }
+
+
+/*  ******************
+    
+
+// yaw servo camera gimbal,  parallax 360 feedback servo. Rotational rate algorithm.
+void gimbal_process2( int16_t val ){
+float rpm;
+float r;
+float bank;
+int us;
+static uint8_t mod;
+int pos;
+
+static int8_t p;
+
+  // only need to do this at the 50 hz rate
+  ++mod;
+  mod &= 3;
+  if( mod == 0 ){
+
+     // 393 is the gyro reading for 6 deg/sec or 1 rpm
+     // calculate what rate we think the servo should turn
+
+     rpm = (float)val / 393.0;                      // match the yaw rotational rate for the gimbal function
+     rpm += float(user_g)  * ( 15.0/500.0);         // map user input to max 15 rpm
+
+     // add a small restoring rpm toward zero value ( 338 was aligned straight ahead )
+     // the feedback signal is wired via a 1k resistor to pin A3 with 3.3uf to ground
+     pos = analogRead(A3);
+     rpm += (float)( 338 - pos ) * .015;
+
+     // add a look where you are going based upon the aileron control and current servo rotation
+     if( user_a > 20 || user_a < -20 ){              // deadband for trim
+        bank = (float)user_a/2.0 + 338;              // where we think we should look
+        r = float(user_a) * ( 15.0/500.0 );          // get a rpm from the stick input as variable r
+        r = abs(r);                                  // always rotate toward the calculated bank even if backwards to stick
+        bank = bank - (float)pos;                    // get the error and sign of the rotation
+        r *= bank/100.0;                             // shrink r to zero if we are looking there
+        rpm += r;
+     }
+     
+     // calc the servo command wanted, remove the servo deadband     32 -19 for 7.5 volts. 35 -22 for 5 v
+     if( rpm >= 1.0 )        us = map( rpm, 0,140, 35,220 );    // replace +-20 with actual deadband found by experiment
+     else if( rpm < -1.0 )   us = map( rpm, 0,-140, -22,-220);  // need to calibrate map for voltage applied to the servo
+     else                    us = 0;                            // turns too fast at 7.5 volts
+                                                            
+     
+     // avoid 360 degree rotations if we have a video out cable attached
+     if( pos < 70 ) us = constrain(us, 0, 400 );
+     if( pos > 605 ) us = constrain(us, -400, 0 );
+     
+     if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
+     us = constrain(us , -220, 220 );    // keep rate in servo active area
+
+     gimbal.writeMicroseconds( 1500 + us ); 
+
+     if( ++p > 16 ){
+        p = 0;
+        //if( DBUG )Serial.print(pos); Serial.write(' '); Serial.print(rpm); Serial.write(' ');\
+              Serial.print(-us); Serial.write(' '); Serial.println(roll); 
+     }                                         
+  }
+}
+
+
+// yaw gimbal 360 servo, with the standard servo algorithm. A combination of gimbal_process and gimbal_process2
+void gimbal_process1( int16_t val ){
+static float yaw;
+static int last;
+static int ave_us;
+float roll_out;
+float angle, angle_at;
+int pos, us;
+
+    yaw += val * (0.00000133 * 57.3);         // integrate yaw giving angle in degrees
+    roll_out = (roll-ROLL_ANGLE)*0.75;        // leak toward the roll angle. Look where you are going.
+    yaw -= 0.006 * (yaw-roll_out);            // leak the integral toward roll.
+
+    // merge the user input
+    angle = map( user_g,-500,500,-120,120 );
+    angle += yaw;
+    angle = constrain(angle,-120,120);
+               
+    // find the error angle
+    pos = analogRead(A3);
+    angle_at = (pos-338.0) * ( 180.0/330.0 );     // only about 0.5 degrees resolution, not so good.
+    angle = angle - angle_at;
+
+    // PD control
+    us = 1.5 * angle;                    // 1.5
+    us -= 0.3 * (float)(pos - last);
+    last = pos;
+    // add a desired deadband and remove servo deadband
+    if( us > 0 ) us += 36;
+    else if( us < 0 ) us -= 23;
+    else us = 0;
+
+    // oscillates at higher P gain, is the feedback out of phase?
+    //if( DBUG ) Serial.print(us); Serial.write( ' ' ); Serial.println(pos);
+        
+    if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
+    us = constrain(us , -80, 80 );      // keep rate in a slower servo active area
+    
+    // rate is 4x 50hz so filter at 3/4 rate.  Or 1/2 rate for less damping.
+    ave_us =  ave_us + us;
+    ave_us >>= 1;  
+    gimbal.writeMicroseconds( 1500 + ave_us ); 
+
+}
+
+
+
+
+// yaw servo gimbal, standard servo
+void gimbal_process( int16_t val ){
+//float w0;
+float val_out;
+//const float a0 = 0.894859;        // butterworth 5hz highpass constants, 200 hz sample rate
+//const float a1 = 1.778632;
+//const float a2 = -0.800803;
+//const float b1 = -2.0;
+//const float b2 = 1.0;
+//static float w1,w2;
+//static uint8_t mod;
+static float yaw;
+float roll_out;
+int angle_out;
+//static int current_angle;
+//static int active;
+//static int last_user_g;
+
+ //   ++mod;            // 50 hz rate for writing the servo's
+ //   mod &= 3;
+    
+    // high pass filter the data so normal turn rates are filtered out leaving just unwanted flight
+    // oscillations such as dutch roll to be countered by the camera gimbal
+    // w0 = a0 * (float)val + a1 * w1 + a2 * w2;
+    // val_out = w0 + b1 * w1 + b2 * w2;
+    // w2 = w1; w1 = w0;                      // move delay terms 
+    // the filter is too agressive or implemented incorrectly.  The integral leak works almost as desired.   
+
+    val_out = val;                            // filter bypass
+    yaw += val_out * (0.00000133 * 57.3);     // integrate yaw giving angle in degrees
+    roll_out = (roll-ROLL_ANGLE)*0.75;        // leak toward the roll angle. Look where you are going.
+    yaw -= 0.006 * (yaw-roll_out);            // leak the integral toward roll.
+
+    // merge the user input
+
+       angle_out = map( user_g,-500,500,-60,60 );
+       angle_out += yaw;     
+       if( GIMBAL_REVERSE ) angle_out = -angle_out;
+       angle_out = constrain(angle_out,-60,60);
+       // !!! maybe should process before adding in the 90 offset value
+       // PID control or match the rate of change
+       // one_shot = angle_out + 90;   change to a +- 500us value
+       angle_out = map( angle_out,-90,90,-500,500 );
+       gimbal.writeMicroseconds(1500+angle_out);
+
+}
+
+ 
+********************** */
+ 
