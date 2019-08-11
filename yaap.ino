@@ -37,6 +37,7 @@ Servo gimbal;
 
 int user_a, user_e, user_g;   // user radio control inputs
 int user_pos;                 // feedback servo position
+int a_trim;
 
 struct PWM {
    uint8_t data;
@@ -49,12 +50,13 @@ uint8_t pwm_in, pwm_out;
 // IMU variables
 int16_t gyro_x, gyro_y, gyro_z;
 int16_t acc_x, acc_y, acc_z;      // accelerometer coordinates
-float  fax, fay, faz;             // gyro based accel coordinates.  Less noise.
+float  fax, fay, faz;             // gyro based accel coordinates.
 int16_t temperature;
 long gyro_x_cal, gyro_y_cal, gyro_z_cal;
 unsigned long IMU_timer;
 
 float pitch,roll;
+float temp_in_C;
 int8_t g_flag;
 
 /********************************************************************************/
@@ -74,9 +76,11 @@ void setup(){
      Serial.begin(57600);                                //Use only for debugging
      Serial.println(F("MPU-6050 YAAP V1.0"));
   }
-  pinMode(13, OUTPUT);                                   //Set output 13 (LED) as output
+  pinMode(13, OUTPUT);                // Set output 13 (LED) as output, on when running OK
+                                      // LED will be out if the I2C hangs up
   
-  delay(2000);                        // unit jiggle delay after battery is connected
+  
+  delay(2000);                        // plane jiggle delay while battery is connected
   setup_mpu_6050_registers();         //Setup the registers of the MPU-6050 (500dfs / +/-8g) and start
   calibrate_gyro();
   
@@ -88,20 +92,20 @@ void setup(){
 
 
   // user radio inputs.  Not sure the best way to do pin change interrupts so try this way.
-  // Some info about attach_interrupt on internet seems outdated.  This is UNO specific code.  
+  // Some info about attach_interrupt on internet seems outdated.    
   pinMode(A0,INPUT);
   pinMode(A1,INPUT);
   pinMode(A2,INPUT);
   pinMode(A3,INPUT);
 
-  noInterrupts();
+  noInterrupts();    // This is UNO specific code.
   PCICR |= 2;
   PCMSK1 |= 15;      // was 7 for just the servo inputs, now added the feedback servo wire
   interrupts();
 
-     //cal360();
+     //cal360();     // printing values to calibrate the 360 feedback servo at 6 volts
      //while(1);
-  
+  get_trim();
 }
 
 ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver wired to A0,A1,A2
@@ -185,6 +189,29 @@ void loop(){
      servo_process();
 }
 
+
+// need to have the interrupts running in order to read the aileron trim position
+// don't hang if the TX radio is turned off
+void get_trim(){
+int i;
+
+   for( i = 0; i < 100; ++i ){                      // 200 ms long
+      delay(2);                                     // small delay because the
+      while( pwm_in != pwm_out ) user_process();    // feedback servo generates alot of interrupts
+      if( i == 50 ) a_trim = user_a;                // capture a value
+      if( user_a < -50 || user_a > 50 ){            // someone is moving the sticks, abort
+         a_trim = 0;
+         break;
+      }
+      if( i > 50 ){                                 // test if the captured value is stable
+         if( user_a < a_trim-5 || user_a > a_trim+5 ){
+            a_trim = 0;
+            break;
+         }
+      }
+   }
+  
+}
 
 void calibrate_gyro(){     /* try to find repeatable readings detecting when motionless */
 unsigned char trys;
@@ -362,6 +389,7 @@ float s,c,t;
 
   // flag to run the gimbal processing
    g_flag = 1;
+   //temp_in_C = (float)temperature/340.0 + 36.53;
   
    if( DBUG  ){
       ++p;
@@ -369,74 +397,81 @@ float s,c,t;
         //Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
         //Serial.print((int)fax); Serial.write(' '); Serial.print((int)fay);
         //Serial.write(' '); Serial.println((int)faz);
+        //Serial.print(temp_in_C);   Serial.write(' ');
+        //Serial.print(acc_x);       Serial.write(' ');
+        //Serial.println(gyro_y);
         }
    }
 }
 
+
  // yaw servo camera gimbal,  parallax 360 feedback servo. Rotational rate algorithm 2.
 void gimbal_process3( int16_t val ){
 float rpm;
-int us;
+float us;
+float r;
 int i;
 static int8_t p;
 static float fpos = 500.0;
 static uint8_t mod;
 
-  ++mod;
+  ++mod;             // run at 50 hz rate
   mod &= 3;
   if( mod == 0 ){
-     val = highpass(val);
+     //val = highpass(val);
      
      // 393 is the gyro reading for 6 deg/sec or 1 rpm
      // calculate what rate we think the servo should turn
+     // disable when actively turning the airplane with aileron
+     // match the yaw rotation rate
+     rpm = 0;
+     if( user_a > a_trim-25 && user_a < a_trim+25 ) rpm = (float)val / 393.0;
+     rpm += float(user_g)  * ( 15.0/500.0);    // map user input to max 15 rpm
 
-     rpm = (float)val / 393.0;                      // match the yaw rotational rate for the gimbal function
-     rpm += float(user_g)  * ( 15.0/500.0);         // map user input to max 15 rpm
-
-     // add restoring force toward the zero value
-     rpm += (float)( 575.0 - user_pos ) * 0.02;
-
-     // add a correction due to the difference in the position and the calculated future position
-     rpm -= 0.05 * ( (float)user_pos - fpos );
-     
+     // add a small restoring force toward the zero value of 547 ( if servo splines line up correctly )
+     r = (float)( 547 - user_pos ) * 0.02;     // .02
+     r = constrain(r,-1.5,1.5);
+     rpm += r;
      // calc the servo command wanted, remove the servo deadband
-     us = 0.8 * rpm;                    // 0.575 for high speed rotations
-     if( rpm >= 0.5 )      us += 35;    // actual servo deadband found by experiment( 35 )
-     else if( rpm < -0.5 ) us -= 18; 
-     else                  us = 0;
+     us = 0.8 * rpm;
+     if( rpm >= 1.0 )      us += 31.8;    // actual servo deadband found by experiment( 34or35 and -18 )
+     else if( rpm < -1.0 ) us -= 15.8;    // slowest rpm is about 4, zero points extrapolated to give
+     else                  us = 0;        // 4 rpm at 35, -19.
                                                             
      // avoid 360 degree rotations in case we have a video out cable attached
-     //if( pos < 70 ) us = constrain(us, 0, 400 );
-     //if( pos > 605 ) us = constrain(us, -400, 0 );
+     if( user_pos < 100 ) us = constrain(us, 0, 400 );
+     if( user_pos > 1000 ) us = constrain(us, -400, 0 );
 
+     // apply a position feedback correction
      // calc where we think the position should be for next time, future position.
      // 200 hz rate: 1038 units for a rotation, 12000 samples in a minute --> 0.0865 factor
      //  50 hz rate: 1038 units, 3000 samples per minute --> 0.346 factor
      if( us != 0 ){
-        fpos +=  0.346 * rpm ;
+        us += 0.2 * ( fpos - (float)user_pos );
+        fpos +=  0.346 * rpm ;                            // expected position for next time
      }
      fpos = 0.99*fpos + 0.01*(float)user_pos; // converge the future and actual servo position values
-     fpos = constrain(fpos,28,1044);
+     fpos = constrain(fpos,28,1066);
           
      if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
      us = constrain(us , -220, 220 );    // keep rate in servo active area
 
-     gimbal.writeMicroseconds( 1500 + us ); 
+     gimbal.writeMicroseconds( 1500 + (int)us ); 
 
      if( ++p > 32 ){
         p = 0;
         if( DBUG ){
-          Serial.print( rpm ); Serial.write(' ');
-          Serial.print( us ); Serial.write(' ');
-          Serial.print( fpos ); Serial.write(' ');
-          Serial.println( user_pos );
+         // Serial.print( rpm ); Serial.write(' ');
+         // Serial.print( us ); Serial.write(' ');
+         // Serial.print( fpos ); Serial.write(' ');
+         // Serial.println( user_pos );
         }              
      }
   }
 }
 
 
-
+/*
 int16_t highpass( int16_t val ){
 float w0;
 int16_t val_out;
@@ -467,7 +502,7 @@ static uint8_t p;
      }
      return val_out;
 }
-
+*/
 
 void cal360(){     // print out some numbers to calibrate the parallax 360 servo
 
@@ -640,7 +675,8 @@ static int8_t p;
   }
 }
 
-
+*/
+/*
 // yaw gimbal 360 servo, with the standard servo algorithm. A combination of gimbal_process and gimbal_process2
 void gimbal_process1( int16_t val ){
 static float yaw;
@@ -648,10 +684,10 @@ static int last;
 static int ave_us;
 float roll_out;
 float angle, angle_at;
-int pos, us;
+float us;
 
     yaw += val * (0.00000133 * 57.3);         // integrate yaw giving angle in degrees
-    roll_out = (roll-ROLL_ANGLE)*0.75;        // leak toward the roll angle. Look where you are going.
+    roll_out = (roll-ROLL_ANGLE)*0.6;        // leak toward the roll angle. Look where you are going.
     yaw -= 0.006 * (yaw-roll_out);            // leak the integral toward roll.
 
     // merge the user input
@@ -660,34 +696,31 @@ int pos, us;
     angle = constrain(angle,-120,120);
                
     // find the error angle
-    pos = analogRead(A3);
-    angle_at = (pos-338.0) * ( 180.0/330.0 );     // only about 0.5 degrees resolution, not so good.
+    angle_at = ((float)user_pos-547.0) * ( 360.0/1038.0 );
     angle = angle - angle_at;
 
     // PD control
-    us = 1.5 * angle;                    // 1.5
-    us -= 0.3 * (float)(pos - last);
-    last = pos;
+    us = 1.30 * angle;                    // 1.5
+   // us -= 0.3 * (float)(user_pos - last);
+   // last = user_pos;
     // add a desired deadband and remove servo deadband
-    if( us > 0 ) us += 36;
-    else if( us < 0 ) us -= 23;
+    if( us > 1.0 ) us += 36;
+    else if( us < -1.0 ) us -= 19;
     else us = 0;
-
-    // oscillates at higher P gain, is the feedback out of phase?
-    //if( DBUG ) Serial.print(us); Serial.write( ' ' ); Serial.println(pos);
         
     if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
     us = constrain(us , -80, 80 );      // keep rate in a slower servo active area
     
     // rate is 4x 50hz so filter at 3/4 rate.  Or 1/2 rate for less damping.
-    ave_us =  ave_us + us;
-    ave_us >>= 1;  
+    //ave_us =  ave_us + us;
+    //ave_us >>= 1;
+       ave_us = us;  
     gimbal.writeMicroseconds( 1500 + ave_us ); 
 
 }
+*/
 
-
-
+/*
 
 // yaw servo gimbal, standard servo
 void gimbal_process( int16_t val ){
