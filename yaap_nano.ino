@@ -7,11 +7,15 @@
  *    Servo's should be reversed here and not in the transmitter.
  *    
  *    This version has non-blocking I2C routines.
+ *    
+ *    For an airplane setup: set the correct mounting, adjust the roll and pitch angles and
+ *    print out the accelerometer zero values and put them in a #ifdef #endif block.  ( see read_mpu.. )
  */
 
+#define ULTRALIGHT_UNO   // pick which airplane we are compiling for
+// #define NONE_NANO     // not installed in a plane yet
 
-
-#define DBUG 1
+#define DBUG 0           // controls serial prints, normally should be 0
 #define I2BUFSIZE 16     // must be a power of 2 and at least 16 for this application
 #define MPU6050  0x68
 
@@ -19,18 +23,43 @@
 #define INVERTED_ 1
 #define LEFT_SIDE 2
 #define RIGHT_SIDE 3
-const char mounting = INVERTED_;   // pick one of the above
 
-#define WING_ANGLE  1.0            // mounting adjustment and desired trim pitch
-#define ROLL_ANGLE  0.0            // mounting adjustment
-#define ELE_REVERSE 0
-#define AIL_REVERSE 0
-#define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+// airplane specific defines
+#ifdef NONE_NANO
+ const char mounting = INVERTED_;   // pick one of the above orientations
 
-// empirical found values for this one MPU
-#define ACC_Z_0  1104              // way off for some reason
-#define ACC_Y_0  -104
-#define ACC_X_0  -150
+ #define WING_ANGLE  1.0            // mounting adjustment and desired trim pitch
+ #define ROLL_ANGLE  0.0            // mounting adjustment
+ #define ELE_REVERSE 0
+ #define AIL_REVERSE 0
+ #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+// empirical found values for this MPU, first Nano version
+// !!! redo this when it is mounted in a plane
+ #define ACC_Z_0  1104              // way off for some reason
+ #define ACC_Y_0  -104
+ #define ACC_X_0  -150
+#endif
+
+#ifdef ULTRALIGHT_UNO
+ const char mounting = UPRIGHT;     // pick one of the above orientations
+
+ #define WING_ANGLE -2.0            // mounting adjustment and desired trim pitch, reading at desired pitch
+                                    // normally would be positive but mounted slanted down in this case
+ #define ROLL_ANGLE -1.54           // mounting adjustment, reading when wings level
+
+ #define ELE_REVERSE 0
+ #define AIL_REVERSE 0
+ #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+// empirical found values for this MPU, UNO version
+ #define ACC_Z_0   -200
+ #define ACC_Y_0    100
+ #define ACC_X_0   -200
+
+#endif
+
+#define ALPHA  0.005               // convergence of accelerometer and gyro values.  0.005 is 1 second time constant
 
 #include <Servo.h>
 #include <avr/interrupt.h>
@@ -267,9 +296,10 @@ float s,c,t;
   
   // leak the accelerometer values into the gyro based ones to counter gyro drift and
   // approximation errors
-     fax = 0.995 * fax + 0.005 * acc_x;
-     fay = 0.995 * fay + 0.005 * acc_y;
-     faz = 0.995 * faz + 0.005 * acc_z;
+     fax = (1.0 - ALPHA) * fax + ALPHA * acc_x;
+     fay = (1.0 - ALPHA) * fay + ALPHA * acc_y;
+     faz = (1.0 - ALPHA) * faz + ALPHA * acc_z;
+
 
   // calculate pitch and roll directly from the gyro based axis orientation just as one would with
   // accelerometer values
@@ -316,6 +346,8 @@ int16_t temp;
 
 void read_mpu_6050_data(){        // on entry read data should have been queued and completed
                                   // all this does is read from the buffer and assign values
+static unsigned int p;
+
   acc_x = i2read_int();
   acc_y = i2read_int();
   acc_z = i2read_int();
@@ -325,6 +357,18 @@ void read_mpu_6050_data(){        // on entry read data should have been queued 
   gyro_z = i2read_int();
   
   if( mounting != UPRIGHT ) change_orientation();
+
+  // determine the accelerometer offsets by moving the mpu to a number of right angles to gravity
+  // and noting the values read for +g and -g.  Find an average offset to read approx 4096 both pos and neg G.
+  // Do this one time.  Note that this is after the orientation adjustment has been applied.
+  if( DBUG ){
+     ++p;
+     if( ( p & 63 ) == 0){
+       // Serial.print( acc_x );  Serial.write(' ');    // print out X,Y,Z accel values
+       // Serial.print( acc_y );  Serial.write(' ');
+       // Serial.println( acc_z );
+     }
+  }
 
   if( setup_done ){              // adjust the values once the calibration is complete
      gyro_x -= gyro_x_cal;
@@ -356,12 +400,12 @@ static int yaw_I;
    // accelerometers will see a banked turn as flying upright
    // integrate the yaw rotation to counter this effect
    // apply to aileron.  range 160 / 50hz --> 3 second time constant.  Watch flight for signs of oscillation.
-   // if actively turning, start over with a zero value
-   if( user_a > a_trim+20 || user_a < a_trim-20 )  yaw_I = 0;
-   if( gyro_z < -20 ) --yaw_I;
-   if( gyro_z > 20 ) ++yaw_I;
-   yaw_I = constrain(yaw_I,-80,80);   //  adjust range for the time constant
-   a += (yaw_I >> 2);                 //  and divide to get +- 20 max, a very small surface movement
+   if( gyro_z < -393 ) --yaw_I;
+   else if( gyro_z > 393 ) ++yaw_I;
+   else if( yaw_I < 0 ) ++yaw_I;      // leak the integral toward zero
+   else if( yaw_I > 0 ) --yaw_I;
+   yaw_I = constrain(yaw_I,-120,120); //  adjust range for the time constant  80 to 120
+   a += (yaw_I >> 2);                 //  and divide by 4 to get +- 20 to +- 30 max, a very small surface movement
 
 
    // if upside down, zero the elevator, avoid split s into the ground.

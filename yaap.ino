@@ -12,7 +12,7 @@
  *    Servo's should be reversed here and not in the transmitter.
  */
 
-#define DBUG 0    // for serial prints
+#define DBUG 0     // for serial prints
 
 #define UPRIGHT 0  // mounting orientation, Y axis is always towards the front
 #define INVERTED_ 1
@@ -20,12 +20,14 @@
 #define RIGHT_SIDE 3
 const char mounting = UPRIGHT;     // pick one of the above
 
-#define WING_ANGLE -2.4            // mounting adjustment and desired trim pitch (-4.4 last flight )
-#define ROLL_ANGLE -0.85           // mounting adjustment ( 5.6 when arduino was upright )
+#define WING_ANGLE -2.4            // mounting adjustment and desired trim pitch
+#define ROLL_ANGLE -1.0            // mounting adjustment (-0.85) ( 5.6 when arduino was upright )
 
 #define ELE_REVERSE 0
 #define AIL_REVERSE 0
 #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+#define ALPHA  0.003               // convergence of accelerometer and gyro values.  0.005 is 1 second time constant
 
 #include <Wire.h>
 #include <Servo.h>
@@ -37,7 +39,7 @@ Servo gimbal;
 
 int user_a, user_e, user_g;   // user radio control inputs
 int user_pos;                 // feedback servo position
-int a_trim;
+int a_trim;                   // value of roll trim found during setup()
 
 struct PWM {
    uint8_t data;
@@ -103,8 +105,8 @@ void setup(){
   PCMSK1 |= 15;      // was 7 for just the servo inputs, now added the feedback servo wire
   interrupts();
 
-     //cal360();     // printing values to calibrate the 360 feedback servo at 6 volts
-     //while(1);
+    // cal360();     // printing values to calibrate the 360 feedback servo at 6 volts
+    // while(1);
   get_trim();
 }
 
@@ -277,9 +279,9 @@ int16_t temp;
 
 
 void servo_process(){    // write the servo's every 20 ms
-static unsigned long timer;
-static int yaw_I;    
+static unsigned long timer;    
 int a,e;
+static int yaw_I;
 
 
    if( millis() - timer < 20 ) return;
@@ -296,10 +298,12 @@ int a,e;
    // accelerometers will see a banked turn as flying upright
    // integrate the yaw rotation to counter this effect
    // apply to aileron.  range 160 / 50hz --> 3 second time constant.  Watch flight for signs of oscillation.
+   // if actively turning, start over with a zero value ?
+   // if( user_a > a_trim+20 || user_a < a_trim-20 )  yaw_I = 0;  maybe not.
    if( gyro_z < -20 ) --yaw_I;
    if( gyro_z > 20 ) ++yaw_I;
-   yaw_I = constrain(yaw_I,-80,80);   //  adjust range for the time constant
-   a += (yaw_I >> 2);                 //  and divide to get +- 20 max, a very small surface movement
+   yaw_I = constrain(yaw_I,-120,120); //  adjust range for the time constant  80 to 120
+   a += (yaw_I >> 2);                 //  and divide by 4 to get +- 20 to +- 30 max, a very small surface movement
 
 
    // if upside down, zero the elevator, avoid split s into the ground.
@@ -376,9 +380,9 @@ float s,c,t;
   
   // leak the accelerometer values into the gyro based ones to counter gyro drift and
   // approximation errors
-  fax = 0.995 * fax + 0.005 * acc_x;
-  fay = 0.995 * fay + 0.005 * acc_y;
-  faz = 0.995 * faz + 0.005 * acc_z;
+  fax = (1.0 - ALPHA) * fax + ALPHA * acc_x;
+  fay = (1.0 - ALPHA) * fay + ALPHA * acc_y;
+  faz = (1.0 - ALPHA) * faz + ALPHA * acc_z;
 
   // calculate pitch and roll directly from the gyro based axis orientation just as one would with
   // accelerometer values
@@ -412,8 +416,12 @@ float us;
 float r;
 int i;
 static int8_t p;
-static float fpos = 500.0;
+static float fpos = 547.0;
 static uint8_t mod;
+static uint8_t right_hold;
+static uint8_t left_hold;
+//static uint8_t hold;
+float c_lim;
 
   ++mod;             // run at 50 hz rate
   mod &= 3;
@@ -422,21 +430,41 @@ static uint8_t mod;
      
      // 393 is the gyro reading for 6 deg/sec or 1 rpm
      // calculate what rate we think the servo should turn
-     // disable when actively turning the airplane with aileron
-     // match the yaw rotation rate
-     rpm = 0;
-     if( user_a > a_trim-25 && user_a < a_trim+25 ) rpm = (float)val / 393.0;
+     rpm = (float)val / 393.0;
+     
+     // when actively turning, clamp excursions looking away from the turn, hold for 1/2 second after stick release
+     if( user_a > a_trim+20 )  right_hold = 35;
+     if( user_a < a_trim-20 )  left_hold = 35;
+     if( right_hold ){
+         if( user_pos < 556 ) rpm = constrain( rpm,0,60 );  // turning right, allow right of center
+         --right_hold;
+     }
+     if( left_hold ){
+         if( user_pos > 556 ) rpm = constrain( rpm,-60,0);  // turning left, allow left of center
+         --left_hold;
+     }
+    
      rpm += float(user_g)  * ( 15.0/500.0);    // map user input to max 15 rpm
 
-     // add a small restoring force toward the zero value of 547 ( if servo splines line up correctly )
-     r = (float)( 547 - user_pos ) * 0.02;     // .02
-     r = constrain(r,-1.5,1.5);
+     // add a small restoring force toward the zero value ( 547 if servo splines line up correctly )
+     r = (float)( 556 - user_pos ) * 0.02;     // .02
+     c_lim = 0.8;                              // centering force limit  ( 1.5 )
+     // if actively turning, increase this force for 1/2 second or so
+     //if( user_a > a_trim+20 || user_a < a_trim-20 ) hold = 35;
+     //if( hold ) --hold,  r *= 10, c_lim = 4.0;
+     r = constrain(r,-c_lim,c_lim);                // 1.5
      rpm += r;
-     // calc the servo command wanted, remove the servo deadband
-     us = 0.8 * rpm;
-     if( rpm >= 1.0 )      us += 31.8;    // actual servo deadband found by experiment( 34or35 and -18 )
-     else if( rpm < -1.0 ) us -= 15.8;    // slowest rpm is about 4, zero points extrapolated to give
-     else                  us = 0;        // 4 rpm at 35, -19.
+     
+     // calc the servo command wanted, remove the servo deadband  6 volt version
+     //us = 0.8 * rpm;
+     //if( rpm >= 3.0 )      us += 31.8;    // actual servo deadband found by experiment( 34or35 and -18 )
+     //else if( rpm < -3.0 ) us -= 15.8;    // slowest rpm is about 4, zero points extrapolated to give
+     //else                  us = 0;        // 4 rpm at 35, -19.
+     // calc the servo command, 5 volt version
+     us = rpm;
+     if( rpm > 1.0 )       us += 32.0;
+     else if( rpm < -1.0 ) us -= 19.0;
+     else                  us = 0.0;
                                                             
      // avoid 360 degree rotations in case we have a video out cable attached
      if( user_pos < 100 ) us = constrain(us, 0, 400 );
@@ -444,16 +472,18 @@ static uint8_t mod;
 
      // apply a position feedback correction
      // calc where we think the position should be for next time, future position.
-     // 200 hz rate: 1038 units for a rotation, 12000 samples in a minute --> 0.0865 factor
-     //  50 hz rate: 1038 units, 3000 samples per minute --> 0.346 factor
+     // 200 hz rate: 1016 units for a rotation, 12000 samples in a minute --> 0.0846 factor
+     //  50 hz rate: 1016 units, 3000 samples per minute --> 0.339 factor
      if( us != 0 ){
-        us += 0.2 * ( fpos - (float)user_pos );
-        fpos +=  0.346 * rpm ;                            // expected position for next time
+        us += 0.1 * ( fpos - (float)user_pos );           // 0.2
+        fpos +=  0.339 * rpm ;                            // expected position for next time
      }
      fpos = 0.99*fpos + 0.01*(float)user_pos; // converge the future and actual servo position values
      fpos = constrain(fpos,28,1066);
-          
+
+     us = round(us);     
      if( GIMBAL_REVERSE ) us = -us;      // will need reverse as servo moves counter clockwise with increasing PWM period
+                                         // or no reverse if mounted upside down
      us = constrain(us , -220, 220 );    // keep rate in servo active area
 
      gimbal.writeMicroseconds( 1500 + (int)us ); 
@@ -461,10 +491,10 @@ static uint8_t mod;
      if( ++p > 32 ){
         p = 0;
         if( DBUG ){
-         // Serial.print( rpm ); Serial.write(' ');
-         // Serial.print( us ); Serial.write(' ');
-         // Serial.print( fpos ); Serial.write(' ');
-         // Serial.println( user_pos );
+          Serial.print( user_a ); Serial.write(' ');    // these seem very stable now.
+          Serial.print( user_e ); Serial.write(' ');
+          Serial.print( user_g ); Serial.write(' ');
+          Serial.println( user_pos );
         }              
      }
   }
@@ -512,9 +542,10 @@ unsigned long timer;
 int pos, oldpos;
 int diff;
 int mx,mn;
+// int dither = 0;    // dither did not produce smooth slower rotations
 
-   //for( us = 1400; us <= 1600; ++us ){    // up
-   for( us = 1530; us >= 1450; --us ){      // down
+   for( us = 1460; us <= 1500; ++us ){    // up
+   //for( us = 1530; us >= 1450; --us ){      // down
       rpm = 0;   mx = 0; mn = 1050;
       timer = millis();
       pos = oldpos = user_pos;
@@ -526,11 +557,16 @@ int mx,mn;
         if( pos > mx ) mx = pos;
         if( pos < mn ) mn = pos;
         oldpos = pos;
-        if( diff > 500 ) {
-            ++rpm;
-            //delay(1);
-        }
+        if( diff > 500 ) ++rpm;
         delay(1);
+        /*
+        if( ++dither == 71 ) gimbal.writeMicroseconds( us + 4 );
+        if( dither == 2*71 ) gimbal.writeMicroseconds( us );
+        if( dither == 3*71 ) gimbal.writeMicroseconds( us - 4 );
+        if( dither == 4*71 ){
+            dither = 0;
+            gimbal.writeMicroseconds( us );
+        } */
         if( pwm_in != pwm_out ) user_process();
       }
       Serial.print(mn); Serial.write(' ');
