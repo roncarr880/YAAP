@@ -9,15 +9,14 @@
  *    This version has non-blocking I2C routines.
  *    
  *    For an airplane setup: set the correct mounting, adjust the roll and pitch angles and
- *    print out the accelerometer zero values and put them in a #ifdef #endif block.  ( see read_mpu.. )
+ *    print out the accelerometer zero values, find average error and put them in a #ifdef #endif block.  
+ *    ( see read_mpu.. )
  */
 
-#define ULTRALIGHT_UNO   // pick which airplane we are compiling for
-// #define NONE_NANO     // not installed in a plane yet
-
+//#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
+#define SCOUT_GYRO_NANO 
+    
 #define DBUG 0           // controls serial prints, normally should be 0
-#define I2BUFSIZE 16     // must be a power of 2 and at least 16 for this application
-#define MPU6050  0x68
 
 #define UPRIGHT 0        // mounting orientation, Y axis is always towards the front
 #define INVERTED_ 1
@@ -25,20 +24,25 @@
 #define RIGHT_SIDE 3
 
 // airplane specific defines
-#ifdef NONE_NANO
+#ifdef SCOUT_GYRO_NANO
  const char mounting = INVERTED_;   // pick one of the above orientations
 
- #define WING_ANGLE  1.0            // mounting adjustment and desired trim pitch
- #define ROLL_ANGLE  0.0            // mounting adjustment
+ #define WING_ANGLE  5.0            // mounting adjustment and desired trim pitch ( was 8 and trim too slow )
+ #define ROLL_ANGLE  2.0            // mounting adjustment
  #define ELE_REVERSE 0
- #define AIL_REVERSE 0
+ #define AIL_REVERSE 1
+ #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
+ // pick one of these as they both use the rudder channel for control
+ #define HAS_RUDDER
+ //#define HAS_GIMBAL  
+            
 // empirical found values for this MPU, first Nano version
-// !!! redo this when it is mounted in a plane
- #define ACC_Z_0  1104              // way off for some reason
- #define ACC_Y_0  -104
- #define ACC_X_0  -150
+
+ #define ACC_X_0  0              // this mpu has a large variation in the z direction, defective?
+ #define ACC_Y_0  -130
+ #define ACC_Z_0  975 
 #endif
 
 #ifdef ULTRALIGHT_UNO
@@ -50,23 +54,35 @@
 
  #define ELE_REVERSE 0
  #define AIL_REVERSE 0
+ #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
-// empirical found values for this MPU, UNO version
- #define ACC_Z_0   -200
- #define ACC_Y_0    100
- #define ACC_X_0   -200
+// #define HAS_RUDDER              // aileron channel controls rudder on this model
+ #define HAS_GIMBAL                // rudder channel controls the camera gimbal
 
+// empirical found values for this MPU, UNO version
+ #define ACC_X_0   -200
+ #define ACC_Y_0    100
+ #define ACC_Z_0   -200
+ 
 #endif
 
-#define ALPHA  0.005               // convergence of accelerometer and gyro values.  0.005 is 1 second time constant
+#define ALPHA  0.001               // convergence of accelerometer and gyro values.  0.005 is 1 second time constant
+#define I2BUFSIZE 16               // must be a power of 2 and at least 16 for this application
+#define MPU6050  0x68              // I2C address
+
 
 #include <Servo.h>
 #include <avr/interrupt.h>
 
 Servo aileron;    // or rudder for 3 channel airplane
 Servo elevator;
-Servo gimbal;
+#ifdef HAS_GIMBAL 
+  Servo gimbal;
+#endif
+#ifdef HAS_RUDDER 
+  Servo rudder;
+#endif
 
 //  I2C buffers and indexes
 unsigned int i2buf[I2BUFSIZE];   // writes
@@ -87,8 +103,9 @@ uint8_t setup_done;
 uint8_t g_flag;
 
 //  Variables for reading pwm signals from the RC receiver
-int user_a, user_e, user_g;   // user radio control inputs
-int user_pos;                 // feedback servo position
+int user_a, user_e;           // user radio control inputs ( A0, A1 )
+int user_g, user_r;           // gimbal control or rudder control ( A2 )
+int user_pos, user_m;         // feedback servo position or mode channel ( A3 )
 int a_trim;                   // value of roll trim found during setup()
 
 struct PWM {                  // buffer pin changes and the time they happened
@@ -109,10 +126,16 @@ void setup() {
 
   aileron.attach(9);
   elevator.attach(10);
-  gimbal.attach(8);
   aileron.writeMicroseconds(1500);
   elevator.writeMicroseconds(1500);
-  gimbal.writeMicroseconds(1500);
+  #ifdef HAS_GIMBAL 
+     gimbal.attach(8);
+     gimbal.writeMicroseconds(1500);
+  #endif
+  #ifdef HAS_RUDDER
+     rudder.attach(11);
+     rudder.writeMicroseconds(1500);
+  #endif   
   
   i2cinit();
   mpu6050_init();
@@ -127,7 +150,7 @@ void setup() {
 
   noInterrupts();    // This is UNO specific code.
   PCICR |= 2;
-  PCMSK1 |= 15;      // was 7 for just the servo inputs, now added the feedback servo wire
+  PCMSK1 |= 15;
   interrupts();
 
   // set the starting position
@@ -231,12 +254,16 @@ int i;
 void loop() {
 
    i2poll();                                        // keep the I2C bus going
-   IMU_process();                                   // find board orientation
+   IMU_process();                                   // find plane orientation
    while( pwm_in != pwm_out ) user_process();       // process servo PWM signals from the receiver
+   
+   #ifdef HAS_GIMBAL
    if( g_flag ){
         gimbal_process3( gyro_z );                  // parallax servo gimbal
         g_flag = 0;
    }
+   #endif
+   
    servo_process();                                 // update the output servo signals
 }
 
@@ -245,7 +272,8 @@ void IMU_process(){
 long v;
 static uint8_t p;
 static uint8_t state;
-float s,c,t;
+float s,c;
+float dx,dy,dz;
 
   switch( state ){
     
@@ -273,26 +301,23 @@ float s,c,t;
   // roll interchanges x and z.
      s = (float)gyro_y * 0.00000133;               // 1 / ( 200 * 65.5 * 57.3 ) = 0.00000133
      c = 1.0 - ( s * s ) / 2.0;                    // empirical value 00000128 works best for roll
-     t = fax;
-     fax = c * fax - faz * s;
-     faz = c * faz + t * s;                                 
+     dx = c * fax - s * faz;                 // formula are simplified, have - 2 fax for difference
+     dz = c * faz + s * fax;                 // and + 1 fax for summation == - 1 fax overall.                
   // pitch interchanges y and z.
      s = (float)gyro_x * 0.00000133;
-     c = 1.0 - ( s * s ) / 2.0;
-     t = fay; 
-     fay = c * fay + faz * s;
-     faz = c * faz - t * s;
+     c = 1.0 - ( s * s ) / 2.0; 
+     dy = c * fay + s * faz;
+     dz = dz + c * faz - s * fay - faz;
   // yaw interchanges x and y.
      s = (float)gyro_z * 0.00000133;
      c = 1.0 - ( s * s ) / 2.0;
-     t = fax;
-     fax = c * fax + fay * s;
-     fay = c * fay - t * s;
+     dx = dx + c * fax + s * fay - fax;
+     dy = dy + c * fay - s * fax - fay;
 
    // set bounds on the values to prevent errors accumlating, should max about 1g on the 8g scale
-     fax = constrain( fax,-4500,4500 );
-     fay = constrain( fay,-4500,4500 );
-     faz = constrain( faz,-4500,4500 );
+     fax = constrain( dx,-4500,4500 );
+     fay = constrain( dy,-4500,4500 );
+     faz = constrain( dz,-4500,4500 );
   
   // leak the accelerometer values into the gyro based ones to counter gyro drift and
   // approximation errors
@@ -305,8 +330,8 @@ float s,c,t;
   // accelerometer values
      v = (long)fax * (long)fax + (long)faz * (long)faz;
      v = sqrt( v );
-     if( v != 0 ) pitch = atan( fay/(float)v ) * 57.296;    // get values +- 90
-     if( faz != 0 ) roll = atan2( fax,faz ) * -57.296;      // get values +- 180
+     if( v != 0 ) pitch = atan( fay/(float)v ) * 57.296 - WING_ANGLE;    // get values +- 90
+     if( faz != 0 ) roll = atan2( fax,faz ) * -57.296 - ROLL_ANGLE;      // get values +- 180
 
   // flag to run the gimbal processing
      g_flag = 1;
@@ -315,8 +340,9 @@ float s,c,t;
   
      if( DBUG  ){
         ++p;
-        if( ( p & 63 ) == 0 ) {
-          Serial.print(pitch);   Serial.write(' ');  Serial.println(roll);
+        if( ( p & 63 ) == 0 ) {        // pitch and roll are printed with the compensation values included 
+                                       // so zero pitch will look like a small positive wing angle
+          Serial.write('P'); Serial.print(pitch);   Serial.write(' '); Serial.write('R');  Serial.println(roll);
         }
      }
   break;
@@ -333,11 +359,11 @@ int16_t temp;
           gyro_x = -gyro_x;  gyro_z = -gyro_z;
           acc_x  = -acc_x;   acc_z  = -acc_z;
        break;
-       case RIGHT_SIDE:
+       case LEFT_SIDE:
           temp = gyro_x;  gyro_x = -gyro_z;  gyro_z = temp;
           temp = acc_x;   acc_x  = -acc_z;   acc_z  = temp;
        break;
-       case LEFT_SIDE:
+       case RIGHT_SIDE:
           temp = gyro_x;  gyro_x = gyro_z;   gyro_z = -temp;
           temp = acc_x;   acc_x  = acc_z;    acc_z  = -temp;
        break;      
@@ -364,9 +390,9 @@ static unsigned int p;
   if( DBUG ){
      ++p;
      if( ( p & 63 ) == 0){
-       // Serial.print( acc_x );  Serial.write(' ');    // print out X,Y,Z accel values
-       // Serial.print( acc_y );  Serial.write(' ');
-       // Serial.println( acc_z );
+        Serial.write('X'); Serial.print( acc_x );  Serial.write(' ');    // print out X,Y,Z accel values
+        Serial.write('Y'); Serial.print( acc_y );  Serial.write(' ');
+        Serial.write('Z'); Serial.print( acc_z );  Serial.write(' ');
      }
   }
 
@@ -380,9 +406,11 @@ static unsigned int p;
   }
 }
 
+// this can be enhanced to provide 3 different algorithms for 3 modes when not using the parallax servo
+// separate algorithm sections for each plane defined SCOUT_GYRO_NANO, ULTRALIGHT_UNO, etc
 void servo_process(){    // write the servo's every 20 ms
 static unsigned long timer;    
-int a,e;
+int a,e,r,m;
 static int yaw_I;
 
 
@@ -390,12 +418,22 @@ static int yaw_I;
 
    timer = millis();
 
+   m = a = e = r = 0;
+
+  #ifndef HAS_GYMBOL
+    // find the mode
+    m = 1;
+    if( m > -200 ) m = 2;
+    if( m > 200 ) m = 3;
+  #endif
+  
+  #ifdef ULTRALIGHT_UNO
    // combine the auto pilot and the user input using a simple algorithm
    // Set Proportional gain with the servo travel desired for +- 90 degrees tilt
    // 40% is -200,200  100% is -500,500
-   // Can't use 100% as that may cancel completely any user inputs.
-   a = map((roll-ROLL_ANGLE)*10,-900,900,250,-250);
-   e = map((pitch-WING_ANGLE)*10,-900,900,-200,200);
+   // 100% may cancel completely any user inputs.
+   a = map((roll)*10,-900,900,250,-250);
+   e = map((pitch)*10,-900,900,-200,200);
 
    // accelerometers will see a banked turn as flying upright
    // integrate the yaw rotation to counter this effect
@@ -407,24 +445,38 @@ static int yaw_I;
    yaw_I = constrain(yaw_I,-120,120); //  adjust range for the time constant  80 to 120
    a += (yaw_I >> 2);                 //  and divide by 4 to get +- 20 to +- 30 max, a very small surface movement
 
-
    // if upside down, zero the elevator, avoid split s into the ground.
    if( faz < 0 ) e = 0;
+  #endif
+
+  #ifdef SCOUT_GYRO_NANO
+   a = map((roll)*10,-900,900,200,-200);    // counteracting proportial gain at 90 degree bank
+   e = map((pitch)*10,-900,900,-200,200);   // counteracting pitch gain
+   // !!! can add modes: gain variation and/or yaw tracking for ground handling etc...
+  #endif
+  
    
    // add in the user input.
-   a += user_a;  e += user_e;
+   a += user_a;  e += user_e; r += user_r;
 
    // reverse the servo's if needed, don't reverse channels in the transmitter.
    if( AIL_REVERSE ) a = -a;
    if( ELE_REVERSE ) e = -e;
+   if( RUD_REVERSE ) r = -r;
 
    a += 1500;     // add in servo mid position
    e += 1500;
+   r += 1500;
 
    a = constrain(a,1000,2000);
    e = constrain(e,1000,2000);
+   r = constrain(r,1000,2000);
    aileron.writeMicroseconds(a);
    elevator.writeMicroseconds(e);
+
+   #ifdef HAS_RUDDER
+      rudder.writeMicroseconds(r);
+   #endif
    
    if( DBUG ){
      //Serial.print("  E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
@@ -432,6 +484,7 @@ static int yaw_I;
   
 }
 
+#ifdef HAS_GIMBAL
 void gimbal_process3( int16_t val ){
 float rpm;
 float us;
@@ -454,9 +507,9 @@ float c_lim;
      // calculate what rate we think the servo should turn
      rpm = (float)val / 393.0;
      
-     // when actively turning, clamp excursions looking away from the turn, hold for 1/2 second after stick release
-     if( user_a > a_trim+20 )  right_hold = 35;
-     if( user_a < a_trim-20 )  left_hold = 35;
+     // when actively turning, clamp excursions looking away from the turn, hold after stick release
+     if( user_a > a_trim+20 )  right_hold = 50;             // at 50 hz rate, value of 50 is 1 second hold
+     if( user_a < a_trim-20 )  left_hold = 50;
      if( right_hold ){
          if( user_pos < 556 ) rpm = constrain( rpm,0,60 );  // turning right, allow right of center
          --right_hold;
@@ -518,6 +571,7 @@ float c_lim;
      }
   }
 }
+#endif
 
 /*
 int16_t highpass( int16_t val ){
@@ -567,8 +621,8 @@ ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver 
 
 void user_process(){    // decode the pwm servo data received, set the user variables to new values
                         // sanity check the data and ignore anything wrong
-                        // 4th channel is a special case, feedback servo, and needs some different processing
-                        // than the RC pwm signals.
+                        // 4th channel is a special case when using the 360 camera gimbal feedback servo
+                        // and needs some different processing than the RC pwm signals.
 static uint8_t last_bit[4];
 static unsigned long last_time[4];
 int8_t mask,b,i;
@@ -587,14 +641,24 @@ int us;
          else{                             // it went low, so figure out how long it was high
             dt = pwm_values[pwm_out].timer - last_time[i];
             us = dt;                       // make a signed copy
-            if( (i < 3 && dt > 800 && dt < 2200) || ( i == 3 && dt < 1200 ) ){   //sanity check
+            
+            #ifdef HAS_GIMBAL
+            if( (i < 3 && dt > 800 && dt < 2200) || ( i == 3 && dt < 1200 ) )   //sanity check
+            #else
+            if( (dt > 800 && dt < 2200) )
+            #endif
+            {
                us -= 1500;                 // sub out the zero point, get -500 to 500 in values
                us = median(i,us);          // discard glitches ( from interrupt latency I think )
                switch(i){
                   case 0:  user_a = us; break;    // ailerons
                   case 1:  user_e = us; break;    // elevator
-                  case 2:  user_g = us; break;    // camera gimbal
+                  case 2:  user_r = user_g = us; break;    // camera gimbal control or the rudder
+                  #ifdef HAS_GIMBAL
                   case 3:  user_pos = us+1500; break;  // feedback servo position
+                  #else
+                  case 3:  user_m = us; break;    // else 4th channel is the mode
+                  #endif
                }  
             }  // end sanity check
          }   // end else
