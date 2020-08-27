@@ -14,7 +14,8 @@
  */
 
 //#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
-#define SCOUT_GYRO_NANO 
+//#define SCOUT_GYRO_NANO 
+#define AQUASTAR_NANO
     
 #define DBUG 0           // controls serial prints, normally should be 0
 
@@ -24,6 +25,28 @@
 #define RIGHT_SIDE 3
 
 // airplane specific defines
+
+#ifdef AQUASTAR_NANO
+ const char mounting = UPRIGHT;     // pick one of the above orientations
+
+ #define WING_ANGLE -8.0           // mounting adjustment and desired trim pitch, reading at desired pitch
+ #define ROLL_ANGLE -5.5           // mounting adjustment, reading when wings level
+
+ #define ELE_REVERSE 0
+ #define AIL_REVERSE 1
+ #define RUD_REVERSE 0
+ #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+// #define HAS_RUDDER              // rudder only model, rudder on aileron channel
+// #define HAS_GIMBAL              // rudder channel controls the camera gimbal
+
+// empirical found values for this MPU
+ #define ACC_X_0   -170
+ #define ACC_Y_0   0
+ #define ACC_Z_0   300    //500
+ 
+#endif
+
 #ifdef SCOUT_GYRO_NANO
  const char mounting = INVERTED_;   // pick one of the above orientations
 
@@ -53,11 +76,11 @@
  #define ROLL_ANGLE -1.54           // mounting adjustment, reading when wings level
 
  #define ELE_REVERSE 0
- #define AIL_REVERSE 0
+ #define AIL_REVERSE 1
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
-// #define HAS_RUDDER              // aileron channel controls rudder on this model
+// #define HAS_RUDDER              // rudder is on channel 5 bypassing the UNO, gimbal on 4
  #define HAS_GIMBAL                // rudder channel controls the camera gimbal
 
 // empirical found values for this MPU, UNO version
@@ -106,7 +129,7 @@ uint8_t g_flag;
 int user_a, user_e;           // user radio control inputs ( A0, A1 )
 int user_g, user_r;           // gimbal control or rudder control ( A2 )
 int user_pos, user_m;         // feedback servo position or mode channel ( A3 )
-int a_trim;                   // value of roll trim found during setup()
+int a_trim;                   // value of roll trim found during setup().  Used for gimbal.
 
 struct PWM {                  // buffer pin changes and the time they happened
    uint8_t data;
@@ -143,10 +166,10 @@ void setup() {
   calibrate_gyro();
 
   // set up the pin change interrupts for reading PWM signals from the receiver
-  pinMode(A0,INPUT);
-  pinMode(A1,INPUT);
-  pinMode(A2,INPUT);
-  pinMode(A3,INPUT);
+  pinMode(A0,INPUT);               // aileron
+  pinMode(A1,INPUT);               // elevator
+  pinMode(A2,INPUT_PULLUP);        // rudder or gimbal control
+  pinMode(A3,INPUT_PULLUP);        // mode or gimbal position ( parallax 360 servo )
 
   noInterrupts();    // This is UNO specific code.
   PCICR |= 2;
@@ -422,9 +445,9 @@ static int yaw_I;
 
   #ifndef HAS_GYMBOL
     // find the mode
-    m = 1;
-    if( m > -200 ) m = 2;
-    if( m > 200 ) m = 3;
+    m = 2;
+    if( user_m < -200 ) m = 1;
+    if( user_m > 200 ) m = 3;
   #endif
   
   #ifdef ULTRALIGHT_UNO
@@ -450,12 +473,32 @@ static int yaw_I;
   #endif
 
   #ifdef SCOUT_GYRO_NANO
-   a = map((roll)*10,-900,900,200,-200);    // counteracting proportial gain at 90 degree bank
-   e = map((pitch)*10,-900,900,-200,200);   // counteracting pitch gain
+   a = map((roll)*10,-900,900,400,-400);    //  proportial gain at 90 degree bank
+   e = map((pitch)*10,-900,900,-300,300);   //  pitch gain
    // !!! can add modes: gain variation and/or yaw tracking for ground handling etc...
   #endif
   
+  #ifdef AQUASTAR_NANO
+   // a = map((roll)*10,-900,900,300,-300);    // counteracting proportial gain at 90 degree bank
+   // deadband the roll to about the dihedral angle
+   if( m == 1 ){            // launch/climb mode, hold a climb angle
+       a = map((roll)*10,-900,900,300,-300);       // wings level, no deadband
+       e = map((pitch-10)*10,-900,900,-800,800);   // climb 10 degrees. higher gain.  watch for oscillations
+   }
+   else if( m == 3 ){       // manual mode, pass through
+       a = e = r = 0;
+   }
+   else{              // angle mode with deadband on roll
+      a = 0;
+      if( roll > 15 )  a = map((roll*10), 150,900,0,-300 );    // will deadband help or hurt dutch roll
+      if( roll < -15 ) a = map((roll*10),-150,-900,0,300 );
+      e = map((pitch)*10,-900,900,-300,300);
+   }
    
+   a = constrain(a,-300,300);               // limit roll force in steep dive or upside down
+   
+  #endif
+  
    // add in the user input.
    a += user_a;  e += user_e; r += user_r;
 
