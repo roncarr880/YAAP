@@ -15,19 +15,45 @@
 
 //#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
 //#define SCOUT_GYRO_NANO 
-#define AQUASTAR_NANO
-    
-#define DBUG 0           // controls serial prints, normally should be 0
+//#define AQUASTAR_NANO
+#define PROTO_BOARD_NANO
 
-#define UPRIGHT 0        // mounting orientation, Y axis is always towards the front
+#define UPRIGHT 0        // mounting orientation, Y axis is always towards the front, make changes below
 #define INVERTED_ 1
 #define LEFT_SIDE 2
 #define RIGHT_SIDE 3
 
 // airplane specific defines
 
+#ifdef PROTO_BOARD_NANO            // testing on a proto board
+ #define DBUG 1                    // controls serial prints, normally should be 0
+ #define FPORT
+ 
+ const char mounting = UPRIGHT;    // pick one of the above orientations
+
+ #define WING_ANGLE 0.0           // mounting adjustment and desired trim pitch, reading at desired pitch
+ #define ROLL_ANGLE 0.0           // mounting adjustment, reading when wings level
+
+ #define ELE_REVERSE 0
+ #define AIL_REVERSE 0
+ #define RUD_REVERSE 0
+ #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+// #define HAS_RUDDER              // rudder only model, rudder on aileron channel
+// #define HAS_GIMBAL              // rudder channel controls the camera gimbal
+
+// empirical found values for this MPU
+ #define ACC_X_0   180
+ #define ACC_Y_0   -50
+ #define ACC_Z_0   30
+ 
+#endif
+
 #ifdef AQUASTAR_NANO
- const char mounting = UPRIGHT;     // pick one of the above orientations
+ #define DBUG 0                    // controls serial prints, normally should be 0
+// #define FPORT
+ 
+ const char mounting = UPRIGHT;    // pick one of the above orientations
 
  #define WING_ANGLE -8.0           // mounting adjustment and desired trim pitch, reading at desired pitch
  #define ROLL_ANGLE -5.5           // mounting adjustment, reading when wings level
@@ -37,7 +63,7 @@
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
-// #define HAS_RUDDER              // rudder only model, rudder on aileron channel
+// #define HAS_RUDDER              // rudder only model, rudder is on the aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
 
 // empirical found values for this MPU
@@ -48,6 +74,9 @@
 #endif
 
 #ifdef SCOUT_GYRO_NANO
+ #define DBUG 0                     // controls serial prints, normally should be 0
+ // #define FPORT
+
  const char mounting = INVERTED_;   // pick one of the above orientations
 
  #define WING_ANGLE  5.0            // mounting adjustment and desired trim pitch ( was 8 and trim too slow )
@@ -69,6 +98,9 @@
 #endif
 
 #ifdef ULTRALIGHT_UNO
+ #define DBUG 0                     // controls serial prints, normally should be 0
+ //#define FPORT
+ 
  const char mounting = UPRIGHT;     // pick one of the above orientations
 
  #define WING_ANGLE -2.0            // mounting adjustment and desired trim pitch, reading at desired pitch
@@ -96,7 +128,10 @@
 
 
 #include <Servo.h>
-#include <avr/interrupt.h>
+
+#ifndef FPORT
+ #include <avr/interrupt.h>
+#endif
 
 Servo aileron;    // or rudder for 3 channel airplane
 Servo elevator;
@@ -106,6 +141,9 @@ Servo elevator;
 #ifdef HAS_RUDDER 
   Servo rudder;
 #endif
+#ifdef FPORT
+  Servo throttle;
+#endif  
 
 //  I2C buffers and indexes
 unsigned int i2buf[I2BUFSIZE];   // writes
@@ -125,25 +163,34 @@ float pitch,roll;
 uint8_t setup_done;
 uint8_t g_flag;
 
-//  Variables for reading pwm signals from the RC receiver
+//  Variables for reading pwm signals from the RC receiver or from FPORT
 int user_a, user_e;           // user radio control inputs ( A0, A1 )
 int user_g, user_r;           // gimbal control or rudder control ( A2 )
 int user_pos, user_m;         // feedback servo position or mode channel ( A3 )
+int user_t;                   // throttle input when using FPORT, else ESC wired direct to PWM receiver
 int a_trim;                   // value of roll trim found during setup().  Used for gimbal.
 
+#ifndef FPORT                 // the way this is written, can't have both FPORT and the gimbal feedback servo 
+                              // on the same plane
 struct PWM {                  // buffer pin changes and the time they happened
    uint8_t data;
    unsigned long timer;
 };
 struct PWM pwm_values[16];
 uint8_t pwm_in, pwm_out;
+#endif
 
 
 /******************************************************************************************/
 
 void setup() {
 
-  if( DBUG ) Serial.begin(38400);
+  #ifdef FPORT 
+      Serial.begin(115200);
+  #else
+      if( DBUG ) Serial.begin(115200);
+  #endif
+  
   pinMode(13,OUTPUT);
   digitalWrite(13,HIGH);   // LED lit will indicate an error during setup
 
@@ -158,34 +205,45 @@ void setup() {
   #ifdef HAS_RUDDER
      rudder.attach(11);
      rudder.writeMicroseconds(1500);
-  #endif   
+  #endif
+  #ifdef FPORT
+     throttle.attach(12);
+     throttle.writeMicroseconds(1000);
+     user_t = -500;
+  #endif
   
   i2cinit();
   mpu6050_init();
   if( DBUG ) Serial.println(F("MPU-6050 successfully initialized"));
   calibrate_gyro();
 
+  #ifndef FPORT
   // set up the pin change interrupts for reading PWM signals from the receiver
-  pinMode(A0,INPUT);               // aileron
-  pinMode(A1,INPUT);               // elevator
-  pinMode(A2,INPUT_PULLUP);        // rudder or gimbal control
-  pinMode(A3,INPUT_PULLUP);        // mode or gimbal position ( parallax 360 servo )
+     pinMode(A0,INPUT_PULLUP);        // aileron
+     pinMode(A1,INPUT_PULLUP);        // elevator
+     pinMode(A2,INPUT_PULLUP);        // rudder or gimbal control
+     pinMode(A3,INPUT_PULLUP);        // mode or gimbal position ( parallax 360 servo )
 
-  noInterrupts();    // This is UNO specific code.
-  PCICR |= 2;
-  PCMSK1 |= 15;
-  interrupts();
+     noInterrupts();    // This is UNO specific code.
+     PCICR |= 2;
+     PCMSK1 |= 15;
+     interrupts();
+     
+     get_trim();        // save current aileron radio trim position for gimbal algorithm
+  #endif
 
   // set the starting position
   fax = acc_x - ACC_X_0;       // initial position from the accelerometer readings read during gyro calibration
   fay = acc_y - ACC_Y_0;       // the offsets were not applied so apply them here
   faz = acc_z - ACC_Z_0;
 
-  get_trim();        // save current aileron radio trim position for gimbal algorithm
-
   IMU_timer = micros(); 
   setup_done = 1;
   digitalWrite(13,LOW);        // setup completed ok
+
+  #ifdef PROTO_BOARD_NANO
+     pinMode(2,INPUT);        // read the state of the MPU interrupt on pin 2
+  #endif
 }
 
 
@@ -194,16 +252,33 @@ void mpu6050_init(){
   // set MPU active
   i2start( MPU6050 );
   i2send(0x6B);
-  i2send(0x00);
+  i2send(0x03);   // clock source Z gyro
   i2stop(); 
    // try the built in low pass filters, 100hz bandwidth
   i2start(MPU6050);
-  i2send(0x1A);
-  i2send(0x02);    
+  #ifdef PROTO_BOARD_NANO
+    i2send(0x19);
+    i2send(0x04);   // sample rate divider for 200 hz, use hardware pin for timing
+  #endif
+  #ifndef PROTO_BOARD_NANO
+   i2send(0x1A);  // send address of 1st register, use nano timing, mpu runs at 1 khz
+                  // not sure if any difference here, which has the most accurate clock ? nano or mpu
+  #endif  
+  i2send(0x02);   // lowpass --> 0x1A
   i2send(0x08);   // 0x08 --> 0x1B 500 dps gyros
   i2send(0x10);   // 0x10 --> 0x1C +- 8g accelerometers
   i2stop();
   i2flush();      // clear the i2c write buffer
+  
+  #ifdef PROTO_BOARD_NANO
+     // try using the int pin to show when new data is ready. Read on nano pin 2.
+    i2start(MPU6050);
+    i2send(0x37);   // INT pin config register
+    i2send(0x30);   // latch mode and any read clear
+    i2send(0x01);   // int enable register, data ready bit
+    i2stop();
+    i2flush();      // clear the i2c write buffer  
+  #endif
 }
 
 
@@ -251,7 +326,9 @@ int error;
    } 
 }
 
+#ifndef FPORT
 // need to have the interrupts running in order to read the aileron trim position
+// trim is used only for the gimbal routine
 // don't hang if the TX radio is turned off
 void get_trim(){
 int i;
@@ -272,13 +349,20 @@ int i;
       }
    }  
 }
+#endif
 
 /********************************************************************/
 void loop() {
 
+
    i2poll();                                        // keep the I2C bus going
    IMU_process();                                   // find plane orientation
-   while( pwm_in != pwm_out ) user_process();       // process servo PWM signals from the receiver
+
+   #ifdef FPORT
+      while( Serial.available() ) fport_process();
+   #else
+      while( pwm_in != pwm_out ) user_process();       // process servo PWM signals from the receiver
+   #endif
    
    #ifdef HAS_GIMBAL
    if( g_flag ){
@@ -291,6 +375,66 @@ void loop() {
 }
 
 
+#ifdef FPORT
+
+#define FRAME  0x7E               // message is very similar to a SLIP frame
+#define FESC   0x7D
+uint16_t fchan[16];
+
+void fport_process(){
+int dat;
+static int shift;
+static int len;
+static int count;
+static uint8_t crc;
+
+   dat = Serial.read();
+
+   switch(dat){
+      case FRAME:  shift = len = count = crc = 0;  break;
+      case FESC:   shift = 0x20;  break;
+      default:
+         dat += shift;
+         shift = 0;
+         crc += dat;
+         if( count == 0 ) len = dat;
+         if( count == 1 && dat != 0 ) len = -2;                          // message type zero wanted else invalid
+         if( count == len+1 && crc == 0xff ) fport_process3();           // message completed no errors
+         if( count > 1 && count <= len ) fport_process2( (uint32_t)dat,count-2 );  // process data
+         ++count;
+      break;
+   }
+}
+
+void fport_process2( uint32_t data, int indx ){   // fport frame is an imbedded SBUS frame
+int i,r;
+                                                  // shift up by remainder, down by 11
+   if( indx == 0 ){
+      for( i = 0; i < 16; ++i ) fchan[i] = 0;                                               
+   }
+   i = (indx*8)/11;
+   r = (indx*8)%11;
+   if( i > 15 ) return;
+   data <<= r;
+   fchan[i] |= data;
+   fchan[i] &= 0x7ff;
+   data >>= 11;                 // if all the bits shift off the end, zero will OR with the next channel
+   if( ++i > 15 ) return;       // and not cause an error.
+   fchan[i] |= data;
+   fchan[i] &= 0x7ff;
+}
+
+void fport_process3( ){     // channels AETRM order
+
+     user_a = map(fchan[0],172,1811,-500,500);
+     user_e = map(fchan[1],172,1811,-500,500);
+     user_t = map(fchan[2],172,1811,-500,500);
+     user_r = map(fchan[3],172,1811,-500,500);
+     user_m = map(fchan[4],172,1811,-500,500);
+}
+
+#endif
+
 void IMU_process(){
 long v;
 static uint8_t p;
@@ -300,12 +444,23 @@ float dx,dy,dz;
 
   switch( state ){
     
-  case 0:                                     // wait for timer
-     if(micros() - IMU_timer >= 5000){        // 200 hz rate
+  case 0:                                       // wait for timer
+    #ifndef  PROTO_BOARD_NANO
+     if( micros() - IMU_timer >= 5000 ){        // 200 hz rate == 5000us
+    #endif
+    #ifdef   PROTO_BOARD_NANO
+     if( digitalRead(2) ){
+    #endif    
+        if(( p & 63 ) == 63 ){
+           Serial.print( micros() - IMU_timer ); Serial.write(' ');
+        }
         IMU_timer += 5000;
+        #ifdef PROTO_BOARD_NANO
+           IMU_timer = micros();
+        #endif   
         state = 1;
         i2queue_read( MPU6050, 0x3B, 14 );    // queue read gyro, accel and temp
-     }                                           
+     }                                              
   break;
   case 1:                                     // wait for I2C reads to finish
      if( i2available() >= 14 ) state = 2;     // continue when reads have finished
@@ -407,7 +562,17 @@ static unsigned int p;
   
   if( mounting != UPRIGHT ) change_orientation();
 
-  // determine the accelerometer offsets by moving the mpu to a number of right angles to gravity
+
+  if( setup_done ){              // adjust the values once the calibration is complete
+     gyro_x -= gyro_x_cal;
+     gyro_y -= gyro_y_cal;
+     gyro_z -= gyro_z_cal;
+     acc_x  -= ACC_X_0;
+     acc_y  -= ACC_Y_0;
+     acc_z  -= ACC_Z_0;
+  }
+
+    // determine the accelerometer offsets by moving the mpu to a number of right angles to gravity
   // and noting the values read for +g and -g.  Find an average offset to read approx 4096 both pos and neg G.
   // Do this one time.  Note that this is after the orientation adjustment has been applied.
   if( DBUG ){
@@ -419,21 +584,13 @@ static unsigned int p;
      }
   }
 
-  if( setup_done ){              // adjust the values once the calibration is complete
-     gyro_x -= gyro_x_cal;
-     gyro_y -= gyro_y_cal;
-     gyro_z -= gyro_z_cal;
-     acc_x  -= ACC_X_0;
-     acc_y  -= ACC_Y_0;
-     acc_z  -= ACC_Z_0;
-  }
 }
 
 // this can be enhanced to provide 3 different algorithms for 3 modes when not using the parallax servo
 // separate algorithm sections for each plane defined SCOUT_GYRO_NANO, ULTRALIGHT_UNO, etc
 void servo_process(){    // write the servo's every 20 ms
 static unsigned long timer;    
-int a,e,r,m;
+int a,e,r,m,t;
 static int yaw_I;
 
 
@@ -520,6 +677,12 @@ static int yaw_I;
    #ifdef HAS_RUDDER
       rudder.writeMicroseconds(r);
    #endif
+
+   #ifdef FPORT
+      t = user_t + 1500;
+      t = constrain(t,1000,2000);
+      throttle.writeMicroseconds(t);
+   #endif   
    
    if( DBUG ){
      //Serial.print("  E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
@@ -528,6 +691,8 @@ static int yaw_I;
 }
 
 #ifdef HAS_GIMBAL
+// pan gimbal using parallax 360 servo
+
 void gimbal_process3( int16_t val ){
 float rpm;
 float us;
@@ -651,74 +816,72 @@ static uint8_t p;
 
 
 
+#ifndef FPORT
 
-/*****************    reading pwm signals  *********************/
-ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver wired to A0,A1,A2
-                     // A3 is the parallax 360 feedback signal
+// PWM input routines
+ /*****************    reading pwm signals  *********************/ 
+ ISR(PCINT1_vect){    // read pwm servo commands from the radio control receiver wired to A0,A1,A2
+                     // A3 is the parallax 360 feedback signal or a mode channel
                      // save the values for later processing
-  pwm_values[pwm_in].data = PINC;
-  pwm_values[pwm_in].timer = micros();
-  ++pwm_in;
-  pwm_in &= 15;
-}
+   pwm_values[pwm_in].data = PINC;
+   pwm_values[pwm_in].timer = micros();
+   ++pwm_in;
+   pwm_in &= 15;
+ }
 
-void user_process(){    // decode the pwm servo data received, set the user variables to new values
+ void user_process(){    // decode the pwm servo data received, set the user variables to new values
                         // sanity check the data and ignore anything wrong
                         // 4th channel is a special case when using the 360 camera gimbal feedback servo
                         // and needs some different processing than the RC pwm signals.
-static uint8_t last_bit[4];
-static unsigned long last_time[4];
-int8_t mask,b,i;
-unsigned long dt;
-int us;  
+ static uint8_t last_bit[4];
+ static unsigned long last_time[4];
+ int8_t mask,b,i;
+ unsigned long dt;
+ int us;  
 
   // check each bit for a change and take the appropriate steps needed
-  mask = 1;    // start with bit 0
-  for(i = 0; i < 4; ++i ){
-     b = pwm_values[pwm_out].data & mask;
-     if(  b ^ last_bit[i] ){               // this bit changed
-         last_bit[i] = b;                  // save the new state of the bit
-         if( b ){                          // it went high, just save the timestamp
+   mask = 1;    // start with bit 0
+   for(i = 0; i < 4; ++i ){
+      b = pwm_values[pwm_out].data & mask;
+      if(  b ^ last_bit[i] ){               // this bit changed
+          last_bit[i] = b;                  // save the new state of the bit
+          if( b ){                          // it went high, just save the timestamp
             last_time[i] = pwm_values[pwm_out].timer;
-         }
-         else{                             // it went low, so figure out how long it was high
-            dt = pwm_values[pwm_out].timer - last_time[i];
-            us = dt;                       // make a signed copy
+          }
+          else{                             // it went low, so figure out how long it was high
+             dt = pwm_values[pwm_out].timer - last_time[i];
+             us = dt;                       // make a signed copy
             
-            #ifdef HAS_GIMBAL
-            if( (i < 3 && dt > 800 && dt < 2200) || ( i == 3 && dt < 1200 ) )   //sanity check
-            #else
-            if( (dt > 800 && dt < 2200) )
-            #endif
-            {
-               us -= 1500;                 // sub out the zero point, get -500 to 500 in values
-               us = median(i,us);          // discard glitches ( from interrupt latency I think )
-               switch(i){
+             #ifdef HAS_GIMBAL
+             if( (i < 3 && dt > 800 && dt < 2200) || ( i == 3 && dt < 1200 ) )   //sanity check
+             #else
+             if( (dt > 800 && dt < 2200) )
+             #endif
+             {
+                us -= 1500;                 // sub out the zero point, get -500 to 500 in values
+                us = median(i,us);          // discard glitches ( from interrupt latency I think )
+                switch(i){
                   case 0:  user_a = us; break;    // ailerons
                   case 1:  user_e = us; break;    // elevator
-                  case 2:  user_r = user_g = us; break;    // camera gimbal control or the rudder
-                  #ifdef HAS_GIMBAL
-                  case 3:  user_pos = us+1500; break;  // feedback servo position
-                  #else
-                  case 3:  user_m = us; break;    // else 4th channel is the mode
-                  #endif
-               }  
-            }  // end sanity check
-         }   // end else
-     }     // end bit change
-     mask <<= 1;   // next bit
-  }                // next i
+                  case 2:  user_r = user_g = us; break;             // camera gimbal control or the rudder
+                  case 3:  user_m = us; user_pos = us+1500; break;  // mode or feedback servo position
+                }  
+             }  // end sanity check
+          }   // end else
+      }     // end bit change
+      mask <<= 1;   // next bit
+   }                // next i
   
-  ++pwm_out;                   // done processing this entry
-  pwm_out &= 15;
-}
+   ++pwm_out;                   // done processing this entry
+   pwm_out &= 15;
+ }
 
-// return the median value of the last 3 to ignore outliers in the data stream
-// store data for 4 channels
-int median( int8_t ch, int val ){
-static int vals[4][3];
-static int8_t in[4];
-int8_t j,i,k;                                  // low, median, high
+ // return the median value of the last 3 to ignore outliers in the data stream
+ // store data for 4 channels
+ int median( int8_t ch, int val ){
+ static int vals[4][3];
+ static int8_t in[4];
+ int8_t j,i,k;                                  // low, median, high
 
    vals[ch][in[ch]] = val;                     // save the new value
    ++in[ch];
@@ -730,9 +893,9 @@ int8_t j,i,k;                                  // low, median, high
    if( vals[ch][i] > vals[ch][k] ) i = k;           // is higher than the high guess
 
    return vals[ch][i];
-}
+ }
 
-
+#endif    // end of the PWM routines
 
 /*****  Non-blocking  I2C  functions   ******/
 
