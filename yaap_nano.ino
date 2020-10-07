@@ -13,10 +13,11 @@
  *    ( see read_mpu.. )
  */
 
+//#define PROTO_BOARD_NANO
 //#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
 //#define SCOUT_GYRO_NANO 
 //#define AQUASTAR_NANO
-#define PROTO_BOARD_NANO
+#define WALLY_WING_NANO
 
 #define UPRIGHT 0        // mounting orientation, Y axis is always towards the front, make changes below
 #define INVERTED_ 1
@@ -41,11 +42,37 @@
 
 // #define HAS_RUDDER              // rudder only model, rudder on aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
+#define HAS_INT                    // MPU int pin wired to pin 2
 
 // empirical found values for this MPU
  #define ACC_X_0   180
  #define ACC_Y_0   -50
  #define ACC_Z_0   30
+ 
+#endif
+
+#ifdef WALLY_WING_NANO             // chuck glider wing on Simple Ultimate 
+ #define DBUG 1                    // controls serial prints, normally should be 0
+ #define FPORT
+ 
+ const char mounting = UPRIGHT;    // pick one of the above orientations
+
+ #define WING_ANGLE 0.0           // mounting adjustment and desired trim pitch, reading at desired pitch
+ #define ROLL_ANGLE 0.0           // mounting adjustment, reading when wings level
+
+ #define ELE_REVERSE 0
+ #define AIL_REVERSE 0
+ #define RUD_REVERSE 0
+ #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+// #define HAS_RUDDER              // rudder only model, rudder on aileron channel
+// #define HAS_GIMBAL              // rudder channel controls the camera gimbal
+#define HAS_INT                    // MPU int pin wired to pin 2
+
+// empirical found values for this MPU
+ #define ACC_X_0   250               // !!! will change if mounted upside down?
+ #define ACC_Y_0   -50
+ #define ACC_Z_0   -155
  
 #endif
 
@@ -180,7 +207,7 @@ struct PWM pwm_values[16];
 uint8_t pwm_in, pwm_out;
 #endif
 
-
+unsigned int frames;          // fport debug message
 /******************************************************************************************/
 
 void setup() {
@@ -241,8 +268,8 @@ void setup() {
   setup_done = 1;
   digitalWrite(13,LOW);        // setup completed ok
 
-  #ifdef PROTO_BOARD_NANO
-     pinMode(2,INPUT);        // read the state of the MPU interrupt on pin 2
+  #ifdef HAS_INT
+     pinMode(2,INPUT);        // polling the state of the MPU data ready on pin 2
   #endif
 }
 
@@ -256,11 +283,11 @@ void mpu6050_init(){
   i2stop(); 
    // try the built in low pass filters, 100hz bandwidth
   i2start(MPU6050);
-  #ifdef PROTO_BOARD_NANO
+  #ifdef HAS_INT
     i2send(0x19);
     i2send(0x04);   // sample rate divider for 200 hz, use hardware pin for timing
   #endif
-  #ifndef PROTO_BOARD_NANO
+  #ifndef HAS_INT
    i2send(0x1A);  // send address of 1st register, use nano timing, mpu runs at 1 khz
                   // not sure if any difference here, which has the most accurate clock ? nano or mpu
   #endif  
@@ -270,7 +297,7 @@ void mpu6050_init(){
   i2stop();
   i2flush();      // clear the i2c write buffer
   
-  #ifdef PROTO_BOARD_NANO
+  #ifdef HAS_INT
      // try using the int pin to show when new data is ready. Read on nano pin 2.
     i2start(MPU6050);
     i2send(0x37);   // INT pin config register
@@ -386,9 +413,12 @@ int dat;
 static int shift;
 static int len;
 static int count;
-static uint8_t crc;
+static uint16_t crc;
 
    dat = Serial.read();
+
+   // Serial.print(dat,HEX); Serial.write(' ');
+   // if( dat == FRAME ) Serial.println();
 
    switch(dat){
       case FRAME:  shift = len = count = crc = 0;  break;
@@ -397,9 +427,11 @@ static uint8_t crc;
          dat += shift;
          shift = 0;
          crc += dat;
+         if( crc > 255 ) crc -= 255;                                     // -256 + 1
          if( count == 0 ) len = dat;
          if( count == 1 && dat != 0 ) len = -2;                          // message type zero wanted else invalid
          if( count == len+1 && crc == 0xff ) fport_process3();           // message completed no errors
+            // else if(count == len+1 ){ Serial.print("crc "); Serial.print(crc,HEX); Serial.write(' '); }   
          if( count > 1 && count <= len ) fport_process2( (uint32_t)dat,count-2 );  // process data
          ++count;
       break;
@@ -426,11 +458,17 @@ int i,r;
 
 void fport_process3( ){     // channels AETRM order
 
+     ++frames;
+     
+     // avoid junk the rx sends before it connects to the tx. sends all zero's
+     if( fchan[0] < 150 ) return;
+     
      user_a = map(fchan[0],172,1811,-500,500);
      user_e = map(fchan[1],172,1811,-500,500);
      user_t = map(fchan[2],172,1811,-500,500);
      user_r = map(fchan[3],172,1811,-500,500);
-     user_m = map(fchan[4],172,1811,-500,500);
+     user_m = map(fchan[4],172,1811,-500,500);  
+
 }
 
 #endif
@@ -445,17 +483,17 @@ float dx,dy,dz;
   switch( state ){
     
   case 0:                                       // wait for timer
-    #ifndef  PROTO_BOARD_NANO
+    #ifndef  HAS_INT
      if( micros() - IMU_timer >= 5000 ){        // 200 hz rate == 5000us
     #endif
-    #ifdef   PROTO_BOARD_NANO
+    #ifdef   HAS_INT
      if( digitalRead(2) ){
     #endif    
-        if(( p & 63 ) == 63 ){
+        if(( p & 127 ) == 127 ){
            Serial.print( micros() - IMU_timer ); Serial.write(' ');
         }
         IMU_timer += 5000;
-        #ifdef PROTO_BOARD_NANO
+        #ifdef HAS_INT
            IMU_timer = micros();
         #endif   
         state = 1;
@@ -518,8 +556,12 @@ float dx,dy,dz;
   
      if( DBUG  ){
         ++p;
-        if( ( p & 63 ) == 0 ) {        // pitch and roll are printed with the compensation values included 
+        if( ( p & 127 ) == 0 ) {        // pitch and roll are printed with the compensation values included 
                                        // so zero pitch will look like a small positive wing angle
+          Serial.print("Frames "); Serial.print(frames); Serial.write(' ');
+          Serial.write('A'); Serial.print( user_a ); Serial.write(' '); 
+          Serial.write('E'); Serial.print( user_e ); Serial.write(' ');
+          Serial.write('T'); Serial.print( user_t ); Serial.write(' ');
           Serial.write('P'); Serial.print(pitch);   Serial.write(' '); Serial.write('R');  Serial.println(roll);
         }
      }
@@ -577,7 +619,7 @@ static unsigned int p;
   // Do this one time.  Note that this is after the orientation adjustment has been applied.
   if( DBUG ){
      ++p;
-     if( ( p & 63 ) == 0){
+     if( ( p & 127 ) == 0){
         Serial.write('X'); Serial.print( acc_x );  Serial.write(' ');    // print out X,Y,Z accel values
         Serial.write('Y'); Serial.print( acc_y );  Serial.write(' ');
         Serial.write('Z'); Serial.print( acc_z );  Serial.write(' ');
