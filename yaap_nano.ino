@@ -7,6 +7,7 @@
  *    Servo's should be reversed here and not in the transmitter.
  *    
  *    This version has non-blocking I2C routines.
+ *    Added F.Port decoding as an option for input signals.
  *    
  *    For an airplane setup: set the correct mounting, adjust the roll and pitch angles and
  *    print out the accelerometer zero values, find average error and put them in a #ifdef #endif block.  
@@ -40,7 +41,14 @@
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
-// #define HAS_RUDDER              // rudder only model, rudder on aileron channel
+ int again[3] = {300,300,300};      // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {300,300,300};
+ int ygain[3] = {0,0,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ float adead[3] = {0,0,0};          // deadband if desired
+ float edead[3] = {0,0,0};
+ float eangle[3] = {0,0,0};         // autolaunch climb angle or other pitch adjustments per mode
+
+#define HAS_RUDDER
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
 #define HAS_INT                    // MPU int pin wired to pin 2
 
@@ -52,12 +60,12 @@
 #endif
 
 #ifdef WALLY_WING_NANO             // chuck glider wing on Simple Ultimate 
- #define DBUG 1                    // controls serial prints, normally should be 0
+ #define DBUG 0                    // controls serial prints, normally should be 0
  #define FPORT
  
- const char mounting = UPRIGHT;    // pick one of the above orientations
+ const char mounting = INVERTED_;    // pick one of the above orientations
 
- #define WING_ANGLE 0.0           // mounting adjustment and desired trim pitch, reading at desired pitch
+ #define WING_ANGLE 1.0           // mounting adjustment(-.5) and desired trim pitch(1.5)
  #define ROLL_ANGLE 0.0           // mounting adjustment, reading when wings level
 
  #define ELE_REVERSE 0
@@ -65,14 +73,21 @@
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
+ int again[3] = {400,200,0};      // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {400,200,0};
+ int ygain[3] = {0,5,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ float adead[3] = {0,0,0};          // deadband if desired
+ float edead[3] = {0,0,0};
+ float eangle[3] = {5,0,0};         // autolaunch climb angle or other pitch adjustments per mode
+
 // #define HAS_RUDDER              // rudder only model, rudder on aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
 #define HAS_INT                    // MPU int pin wired to pin 2
 
 // empirical found values for this MPU
- #define ACC_X_0   250               // !!! will change if mounted upside down?
+ #define ACC_X_0   -250              
  #define ACC_Y_0   -50
- #define ACC_Z_0   -155
+ #define ACC_Z_0   155
  
 #endif
 
@@ -90,6 +105,13 @@
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
+ int again[3] = {300,300,0};        // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {800,300,0};        // higher gain for launch
+ int ygain[3] = {0,5,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ float adead[3] = {0,15,0};         // deadband if desired
+ float edead[3] = {0,5,0};
+ float eangle[3] = {12,0,0};        // autolaunch climb angle
+
 // #define HAS_RUDDER              // rudder only model, rudder is on the aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
 
@@ -106,12 +128,20 @@
 
  const char mounting = INVERTED_;   // pick one of the above orientations
 
- #define WING_ANGLE  5.0            // mounting adjustment and desired trim pitch ( was 8 and trim too slow )
+ #define WING_ANGLE  6.0            // mounting adjustment and desired trim pitch ( was 8 and trimmed too slow )
  #define ROLL_ANGLE  2.0            // mounting adjustment
  #define ELE_REVERSE 0
  #define AIL_REVERSE 1
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+ int again[3] = {500,400,300};      // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {400,300,200};
+ int ygain[3] = {0,0,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ float adead[3] = {0,0,0};          // deadband if desired
+ float edead[3] = {0,0,0};
+ float eangle[3] = {0,-1,-2};         // autolaunch climb angle or other pitch adjustments per mode
+                                      // !!! faster trim speed test in combination of less self righting
 
  // pick one of these as they both use the rudder channel for control
  #define HAS_RUDDER
@@ -138,6 +168,13 @@
  #define AIL_REVERSE 1
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
+
+ int again[3] = {250,250,250};      // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {200,200,200};
+ int ygain[3] = {5,5,5};            // yaw autotrim to fly straight, applied to aileron channel  
+ float adead[3] = {0,0,0};          // deadband if desired
+ float edead[3] = {0,0,0};
+ float eangle[3] = {0,0,0};         // autolaunch climb angle or other pitch adjustments per mode
 
 // #define HAS_RUDDER              // rudder is on channel 5 bypassing the UNO, gimbal on 4
  #define HAS_GIMBAL                // rudder channel controls the camera gimbal
@@ -195,7 +232,7 @@ int user_a, user_e;           // user radio control inputs ( A0, A1 )
 int user_g, user_r;           // gimbal control or rudder control ( A2 )
 int user_pos, user_m;         // feedback servo position or mode channel ( A3 )
 int user_t;                   // throttle input when using FPORT, else ESC wired direct to PWM receiver
-int a_trim;                   // value of roll trim found during setup().  Used for gimbal.
+int a_trim;                   // value of roll trim found during setup().  Used for gimbal routine.
 
 #ifndef FPORT                 // the way this is written, can't have both FPORT and the gimbal feedback servo 
                               // on the same plane
@@ -461,7 +498,11 @@ void fport_process3( ){     // channels AETRM order
      ++frames;
      
      // avoid junk the rx sends before it connects to the tx. sends all zero's
-     if( fchan[0] < 150 ) return;
+     if( fchan[0] < 150 ){
+        user_a = user_e = user_r = user_m = 0;
+        user_t = -500;          // disable throttle
+        return;
+     }
      
      user_a = map(fchan[0],172,1811,-500,500);
      user_e = map(fchan[1],172,1811,-500,500);
@@ -614,7 +655,7 @@ static unsigned int p;
      acc_z  -= ACC_Z_0;
   }
 
-    // determine the accelerometer offsets by moving the mpu to a number of right angles to gravity
+  // determine the accelerometer offsets by moving the mpu to a number of right angles to gravity
   // and noting the values read for +g and -g.  Find an average offset to read approx 4096 both pos and neg G.
   // Do this one time.  Note that this is after the orientation adjustment has been applied.
   if( DBUG ){
@@ -628,78 +669,58 @@ static unsigned int p;
 
 }
 
-// this can be enhanced to provide 3 different algorithms for 3 modes when not using the parallax servo
-// separate algorithm sections for each plane defined SCOUT_GYRO_NANO, ULTRALIGHT_UNO, etc
+// 3 modes when not using the parallax servo
 void servo_process(){    // write the servo's every 20 ms
 static unsigned long timer;    
-int a,e,r,m,t;
+int a,e,r,m,t,y;
 static int yaw_I;
+static unsigned int last_frames;
 
 
    if( millis() - timer < 20 ) return;
 
    timer = millis();
 
-   m = a = e = r = 0;
+   m = 1;                                            // default mode 1, should be a self leveling mode 
+   a = e = r = t = y = 0;
+
+   #ifdef FPORT
+      if( frames == last_frames ){
+         user_t = -500;     // turn off motor if not seeing fport packets
+         user_a = user_e = user_r = 0;
+         user_m = 0;                                 // default mode 1, should be a self leveling mode
+         last_frames = frames;
+      }
+   #endif
 
   #ifndef HAS_GYMBOL
     // find the mode
-    m = 2;
-    if( user_m < -200 ) m = 1;
-    if( user_m > 200 ) m = 3;
+    if( user_m < -200 ) m = 0;
+    if( user_m > 200 ) m = 2;
   #endif
+
+  if( roll > adead[m] )  a = map((roll*10), 10*adead[m],900,0,-again[m] );
+  if( roll < -adead[m] ) a = map((roll*10),-10*adead[m],-900,0,again[m] );
+
+  if( pitch-eangle[m] > edead[m] ) e = map( 10*(pitch-eangle[m]), 10*edead[m], 900,0, egain[m] );
+  if( pitch-eangle[m] < -edead[m]) e = map( 10*(pitch-eangle[m]),-10*edead[m],-900,0,-egain[m] ); 
+
+   // accelerometers will see a banked coordinated turn as flying upright
+   // use the yaw rotation to counter this effect 
+  y = ygain[m] * gyro_z / 393;    // gain == servo microseconds per 1 rpm of turn
+  // if mounted inverted, will need to negate this value ?
+  if( y > yaw_I ) ++yaw_I;        // about a 1 second lag time here
+  if( y < yaw_I ) --yaw_I;
+  yaw_I = constrain(yaw_I,-50,50);  // limit amount of servo travel for this 
+  a += yaw_I;
   
-  #ifdef ULTRALIGHT_UNO
-   // combine the auto pilot and the user input using a simple algorithm
-   // Set Proportional gain with the servo travel desired for +- 90 degrees tilt
-   // 40% is -200,200  100% is -500,500
-   // 100% may cancel completely any user inputs.
-   a = map((roll)*10,-900,900,250,-250);
-   e = map((pitch)*10,-900,900,-200,200);
-
-   // accelerometers will see a banked turn as flying upright
-   // integrate the yaw rotation to counter this effect
-   // apply to aileron.  range 160 / 50hz --> 3 second time constant.  Watch flight for signs of oscillation.
-   if( gyro_z < -393 ) --yaw_I;
-   else if( gyro_z > 393 ) ++yaw_I;
-   else if( yaw_I < 0 ) ++yaw_I;      // leak the integral toward zero
-   else if( yaw_I > 0 ) --yaw_I;
-   yaw_I = constrain(yaw_I,-120,120); //  adjust range for the time constant  80 to 120
-   a += (yaw_I >> 2);                 //  and divide by 4 to get +- 20 to +- 30 max, a very small surface movement
-
-   // if upside down, zero the elevator, avoid split s into the ground.
-   if( faz < 0 ) e = 0;
-  #endif
-
-  #ifdef SCOUT_GYRO_NANO
-   a = map((roll)*10,-900,900,400,-400);    //  proportial gain at 90 degree bank
-   e = map((pitch)*10,-900,900,-300,300);   //  pitch gain
-   // !!! can add modes: gain variation and/or yaw tracking for ground handling etc...
-  #endif
-  
-  #ifdef AQUASTAR_NANO
-   // a = map((roll)*10,-900,900,300,-300);    // counteracting proportial gain at 90 degree bank
-   // deadband the roll to about the dihedral angle
-   if( m == 1 ){            // launch/climb mode, hold a climb angle
-       a = map((roll)*10,-900,900,300,-300);       // wings level, no deadband
-       e = map((pitch-10)*10,-900,900,-800,800);   // climb 10 degrees. higher gain.  watch for oscillations
-   }
-   else if( m == 3 ){       // manual mode, pass through
-       a = e = r = 0;
-   }
-   else{              // angle mode with deadband on roll
-      a = 0;
-      if( roll > 15 )  a = map((roll*10), 150,900,0,-300 );    // will deadband help or hurt dutch roll
-      if( roll < -15 ) a = map((roll*10),-150,-900,0,300 );
-      e = map((pitch)*10,-900,900,-300,300);
-   }
-   
-   a = constrain(a,-300,300);               // limit roll force in steep dive or upside down
-   
-  #endif
+  if( faz < 0 ) e = 0;            // if upside down, zero the elevator, avoid figure 9.
+  a = constrain(a,-300,300);      // leave some control movement for user inputs ( max +-500 servo )
+  e = constrain(e,-300,300);
   
    // add in the user input.
    a += user_a;  e += user_e; r += user_r;
+   t = user_t;
 
    // reverse the servo's if needed, don't reverse channels in the transmitter.
    if( AIL_REVERSE ) a = -a;
@@ -709,10 +730,12 @@ static int yaw_I;
    a += 1500;     // add in servo mid position
    e += 1500;
    r += 1500;
+   t += 1500;
 
    a = constrain(a,1000,2000);
    e = constrain(e,1000,2000);
    r = constrain(r,1000,2000);
+   t = constrain(t,1000,2000);
    aileron.writeMicroseconds(a);
    elevator.writeMicroseconds(e);
 
@@ -721,14 +744,12 @@ static int yaw_I;
    #endif
 
    #ifdef FPORT
-      t = user_t + 1500;
-      t = constrain(t,1000,2000);
       throttle.writeMicroseconds(t);
    #endif   
    
-   if( DBUG ){
+   //if( DBUG ){
      //Serial.print("  E ");  Serial.print(e); Serial.print("  A "); Serial.println(a);
-   }
+   //}
   
 }
 
@@ -810,15 +831,15 @@ float c_lim;
 
      gimbal.writeMicroseconds( 1500 + (int)us ); 
 
-     if( ++p > 32 ){
-        p = 0;
-        if( DBUG ){
+    // if( ++p > 32 ){
+    //    p = 0;
+    //    if( DBUG ){
          // Serial.print( user_a ); Serial.write(' ');    // these seem very stable now.
          // Serial.print( user_e ); Serial.write(' ');
          // Serial.print( user_g ); Serial.write(' ');
          // Serial.println( user_pos );
-        }              
-     }
+     //   }              
+     // }
   }
 }
 #endif
@@ -1014,8 +1035,8 @@ static uint8_t delay_counter;
 static unsigned int read_qty;
 static uint8_t first_read;
 
-   if( delay_counter ){   // the library code has a delay after loading the transmit buffer and before the status bits are tested
-     --delay_counter;
+   if( delay_counter ){   // the library code has a delay after loading the transmit buffer
+     --delay_counter;     //  and before the status bits are tested
      return (16 + delay_counter);
    }
    
