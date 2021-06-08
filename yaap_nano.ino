@@ -17,8 +17,8 @@
 //#define PROTO_BOARD_NANO
 //#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
 //#define SCOUT_GYRO_NANO 
-//#define AQUASTAR_NANO
-#define WALLY_WING_NANO
+#define AQUASTAR_NANO
+//#define WALLY_WING_NANO
 
 #define UPRIGHT 0        // mounting orientation, Y axis is always towards the front, make changes below
 #define INVERTED_ 1
@@ -43,7 +43,7 @@
 
  int again[3] = {300,300,300};      // autolevel gain for each mode, 0 for manual mode
  int egain[3] = {300,300,300};
- int ygain[3] = {0,0,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ int ygain[3] = {0,0,0};            // turning detection counter control, applied to aileron channel  
  float adead[3] = {0,0,0};          // deadband if desired
  float edead[3] = {0,0,0};
  float eangle[3] = {0,0,0};         // autolaunch climb angle or other pitch adjustments per mode
@@ -60,25 +60,28 @@
 #endif
 
 #ifdef WALLY_WING_NANO             // chuck glider wing on Simple Ultimate 
- #define DBUG 0                    // controls serial prints, normally should be 0
+// plane debug
+// want more downtrim and/or nose weight
+ #define DBUG 0                   // controls serial prints, normally should be 0
  #define FPORT
  
  const char mounting = INVERTED_;    // pick one of the above orientations
 
- #define WING_ANGLE 1.0           // mounting adjustment(-.5) and desired trim pitch(1.5)
- #define ROLL_ANGLE 0.0           // mounting adjustment, reading when wings level
+// #define WING_ANGLE 1.0           // mounting adjustment(-.5) and desired trim pitch(1.5)
+ #define WING_ANGLE 3.0            // 4/11/21  manual mode needs down trim (was 1.0)
+ #define ROLL_ANGLE -1.0           // mounting adjustment, reading when wings level ( was 0.0 )
 
- #define ELE_REVERSE 0
- #define AIL_REVERSE 0
- #define RUD_REVERSE 0
+ #define ELE_REVERSE 1
+ #define AIL_REVERSE 1
+ #define RUD_REVERSE 0              // no rudder channel, 3 channel plane
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
- int again[3] = {400,200,0};      // autolevel gain for each mode, 0 for manual mode
- int egain[3] = {400,200,0};
- int ygain[3] = {0,5,0};            // yaw autotrim to fly straight, applied to aileron channel  
+ int again[3] = {800,400,0};        // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {800,400,0};        // have launch, cruise, manual modes
+ int ygain[3] = {0,15,0};            // turning detection counter control, applied to aileron channel !!! should be negative when inverted?
  float adead[3] = {0,0,0};          // deadband if desired
  float edead[3] = {0,0,0};
- float eangle[3] = {5,0,0};         // autolaunch climb angle or other pitch adjustments per mode
+ float eangle[3] = {10,0,0};         // autolaunch climb angle or other pitch adjustments per mode
 
 // #define HAS_RUDDER              // rudder only model, rudder on aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
@@ -97,7 +100,7 @@
  
  const char mounting = UPRIGHT;    // pick one of the above orientations
 
- #define WING_ANGLE -8.0           // mounting adjustment and desired trim pitch, reading at desired pitch
+ #define WING_ANGLE -8.0           // -8 mounting adjustment and desired trim pitch, reading at desired pitch
  #define ROLL_ANGLE -5.5           // mounting adjustment, reading when wings level
 
  #define ELE_REVERSE 0
@@ -105,12 +108,12 @@
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
- int again[3] = {300,300,0};        // autolevel gain for each mode, 0 for manual mode
- int egain[3] = {800,300,0};        // higher gain for launch
- int ygain[3] = {0,5,0};            // yaw autotrim to fly straight, applied to aileron channel  
- float adead[3] = {0,15,0};         // deadband if desired
- float edead[3] = {0,5,0};
- float eangle[3] = {12,0,0};        // autolaunch climb angle
+ int again[3] = {300,300,200};        // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {800,300,200};        // higher gain for launch
+ int ygain[3] = {0,5,0};             // turning detection counter control, applied to aileron channel.
+ float adead[3] = {0,5,20};            // deadband angle in degrees
+ float edead[3] = {0,5,20};
+ float eangle[3] = {15,0,0};        // autolaunch climb angle 
 
 // #define HAS_RUDDER              // rudder only model, rudder is on the aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
@@ -128,18 +131,18 @@
 
  const char mounting = INVERTED_;   // pick one of the above orientations
 
- #define WING_ANGLE  6.0            // mounting adjustment and desired trim pitch ( was 8 and trimmed too slow )
+ #define WING_ANGLE  8.0            // mounting adjustment and desired trim pitch ( 8 trimmed too slow ? )
  #define ROLL_ANGLE  2.0            // mounting adjustment
  #define ELE_REVERSE 0
  #define AIL_REVERSE 1
  #define RUD_REVERSE 0
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
- int again[3] = {500,400,300};      // autolevel gain for each mode, 0 for manual mode
- int egain[3] = {400,300,200};
- int ygain[3] = {0,0,0};            // yaw autotrim to fly straight, applied to aileron channel  
- float adead[3] = {0,0,0};          // deadband if desired
- float edead[3] = {0,0,0};
+ int again[3] = {700,500,300};      // autolevel gain for each mode, 0 for manual mode
+ int egain[3] = {600,400,200};
+ int ygain[3] = {0,0,0};            // turning detection counter control, applied to aileron channel  
+ float adead[3] = {0,5,10};          // deadband if desired
+ float edead[3] = {0,5,10};
  float eangle[3] = {0,-1,-2};         // autolaunch climb angle or other pitch adjustments per mode
                                       // !!! faster trim speed test in combination of less self righting
 
@@ -170,8 +173,8 @@
  #define GIMBAL_REVERSE 1           // negative numbers for clockwise rotation of the parallax 360 feedback
 
  int again[3] = {250,250,250};      // autolevel gain for each mode, 0 for manual mode
- int egain[3] = {200,200,200};
- int ygain[3] = {5,5,5};            // yaw autotrim to fly straight, applied to aileron channel  
+ int egain[3] = {200,200,200};      // no modes, gimbal is using A3 for position
+ int ygain[3] = {5,5,5};            // turning detection counter control, applied to aileron channel  
  float adead[3] = {0,0,0};          // deadband if desired
  float edead[3] = {0,0,0};
  float eangle[3] = {0,0,0};         // autolaunch climb angle or other pitch adjustments per mode
@@ -699,6 +702,7 @@ static unsigned int last_frames;
     if( user_m > 200 ) m = 2;
   #endif
 
+  //  gains are servo microseconds per 90 degrees of bank or pitch angle - deadband
   if( roll > adead[m] )  a = map((roll*10), 10*adead[m],900,0,-again[m] );
   if( roll < -adead[m] ) a = map((roll*10),-10*adead[m],-900,0,again[m] );
 
@@ -706,12 +710,14 @@ static unsigned int last_frames;
   if( pitch-eangle[m] < -edead[m]) e = map( 10*(pitch-eangle[m]),-10*edead[m],-900,0,-egain[m] ); 
 
    // accelerometers will see a banked coordinated turn as flying upright
-   // use the yaw rotation to counter this effect 
-  y = ygain[m] * gyro_z / 393;    // gain == servo microseconds per 1 rpm of turn
-  // if mounted inverted, will need to negate this value ?
-  if( y > yaw_I ) ++yaw_I;        // about a 1 second lag time here
-  if( y < yaw_I ) --yaw_I;
-  yaw_I = constrain(yaw_I,-50,50);  // limit amount of servo travel for this 
+   // use the yaw rotation to counter this effect.  Leaky integral.
+  y = gyro_z / 393;               // yaw rpm 
+  y *= ygain[m];                  // gain == servo microseconds per 1 rpm of turn
+  if( y > 0 ) ++yaw_I;            // about a 1 second lag time here  > yaw_I 
+  else if( y < 0 ) --yaw_I;
+  else if( yaw_I > 0 ) --yaw_I;
+  else if( yaw_I < 0 ) ++yaw_I;
+  yaw_I = constrain(yaw_I,-100,100);  // limit amount of servo travel for this 
   a += yaw_I;
   
   if( faz < 0 ) e = 0;            // if upside down, zero the elevator, avoid figure 9.
