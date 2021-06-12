@@ -14,6 +14,7 @@
  *    ( see read_mpu.. )
  */
 
+
 //#define PROTO_BOARD_NANO
 //#define ULTRALIGHT_UNO   // pick which airplane we are compiling for and select correct board in Tools
 //#define SCOUT_GYRO_NANO 
@@ -78,7 +79,7 @@
 
  int again[3] = {800,400,0};        // autolevel gain for each mode, 0 for manual mode
  int egain[3] = {800,400,0};        // have launch, cruise, manual modes
- int ygain[3] = {0,15,0};            // turning detection counter control, applied to aileron channel !!! should be negative when inverted?
+ int ygain[3] = {0,1,0};            // turning detection counter control, applied to aileron channel !!! should be negative when inverted?
  float adead[3] = {0,0,0};          // deadband if desired
  float edead[3] = {0,0,0};
  float eangle[3] = {10,0,0};         // autolaunch climb angle or other pitch adjustments per mode
@@ -110,10 +111,11 @@
 
  int again[3] = {300,300,200};        // autolevel gain for each mode, 0 for manual mode
  int egain[3] = {800,300,200};        // higher gain for launch
- int ygain[3] = {0,5,0};             // turning detection counter control, applied to aileron channel.
- float adead[3] = {0,5,20};            // deadband angle in degrees
- float edead[3] = {0,5,20};
- float eangle[3] = {15,0,0};        // autolaunch climb angle 
+ int ygain[3] = {0,1,1};             // turning detection counter control, applied to aileron channel. 0,1 or -1.
+ int hgain[3] = {0,0,5};             // servo us per degree off course. heading hold.
+ float adead[3] = {0,5,5};            // deadband angle in degrees
+ float edead[3] = {0,10,10};
+ float eangle[3] = {18,0,0};        // autolaunch climb angle 
 
 // #define HAS_RUDDER              // rudder only model, rudder is on the aileron channel
 // #define HAS_GIMBAL              // rudder channel controls the camera gimbal
@@ -174,7 +176,7 @@
 
  int again[3] = {250,250,250};      // autolevel gain for each mode, 0 for manual mode
  int egain[3] = {200,200,200};      // no modes, gimbal is using A3 for position
- int ygain[3] = {5,5,5};            // turning detection counter control, applied to aileron channel  
+ int ygain[3] = {1,1,1};            // turning detection counter control, applied to aileron channel  
  float adead[3] = {0,0,0};          // deadband if desired
  float edead[3] = {0,0,0};
  float eangle[3] = {0,0,0};         // autolaunch climb angle or other pitch adjustments per mode
@@ -678,6 +680,7 @@ static unsigned long timer;
 int a,e,r,m,t,y;
 static int yaw_I;
 static unsigned int last_frames;
+static long heading;
 
 
    if( millis() - timer < 20 ) return;
@@ -712,11 +715,28 @@ static unsigned int last_frames;
    // accelerometers will see a banked coordinated turn as flying upright
    // use the yaw rotation to counter this effect.  Leaky integral.
   y = gyro_z / 393;               // yaw rpm 
-  y *= ygain[m];                  // gain == servo microseconds per 1 rpm of turn
-  if( y > 0 ) ++yaw_I;            // about a 1 second lag time here  > yaw_I 
-  else if( y < 0 ) --yaw_I;
-  else if( yaw_I > 0 ) --yaw_I;
-  else if( yaw_I < 0 ) ++yaw_I;
+  y *= ygain[m];                  
+  if( y > 0 ) yaw_I += 2;            // about a 1 second lag time here  > yaw_I 
+  else if( y < 0 ) yaw_I -= 2;       // bump by 2 as always leaks by one below
+  // else if( yaw_I > 0 ) --yaw_I;
+  // else if( yaw_I < 0 ) ++yaw_I;
+  
+  // heading hold
+  // if( roll < -10 || roll > 10 ) heading = 0;    // new heading
+  // heading change by user when in heading hold mode
+  if( hgain[m] != 0 ){
+     if( user_a > 200 ) heading += 393;            // 360 deg turn in 1 minute
+     if( user_a < -200 ) heading -= 393;
+     user_a = a_trim;                              // !!! need fix for when using FPORT
+     heading += gyro_z;
+  }
+  else heading = 0;                 // feature off
+  
+  y = heading / ( 50 * 65.5 );      // heading degrees off course ( rep rate * gyro reading for 1 degree/sec )
+  y *= hgain[m];                   // gain == servo microseconds per 1 degrees off course
+  if( yaw_I < y ) ++yaw_I;         // leak to heading, or zero if not using the heading hold
+  if( yaw_I > y ) --yaw_I;
+
   yaw_I = constrain(yaw_I,-100,100);  // limit amount of servo travel for this 
   a += yaw_I;
   
